@@ -20,7 +20,7 @@ from app.schemas import (
     OpenStackCredentialUpsert,
 )
 from app.services import clouds_yaml_parser, openstack_validator
-from app.utils.keycloak_auth import get_current_user_keycloak
+from app.utils.auth import get_current_user
 
 router = APIRouter()
 
@@ -82,7 +82,7 @@ def _to_response(
 )
 def get_my_credentials(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     """Always 200 — returns has_credential=False when none configured.
 
@@ -106,7 +106,7 @@ def get_my_credentials(
 def upsert_my_credentials(
     payload: OpenStackCredentialUpsert,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     """Auto-validates against Keystone before persisting.
 
@@ -129,7 +129,7 @@ def upsert_my_credentials(
 def upsert_my_credentials_from_yaml(
     body: OpenStackCredentialFromYaml,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     crud_locks.acquire_user_xact_lock(db, current_user.userId)
     _assert_unlocked(db, current_user)
@@ -146,7 +146,7 @@ def upsert_my_credentials_from_yaml(
 )
 def test_my_credentials(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     """Re-authorize the stored credential and refresh validation metadata.
 
@@ -185,7 +185,7 @@ def test_my_credentials(
 )
 def delete_my_credentials(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     crud_locks.acquire_user_xact_lock(db, current_user.userId)
     _assert_unlocked(db, current_user)

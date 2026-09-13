@@ -16,8 +16,8 @@ from app.models import (
     UserToDeployment,
     UserToTeam,
 )
+from app.utils.auth import get_current_user
 from app.utils.capabilities import get_my_course_teacher_ids
-from app.utils.keycloak_auth import get_current_user_keycloak
 
 router = APIRouter()
 
@@ -36,7 +36,7 @@ class DashboardStatsResponse(BaseModel):
 @router.get("/stats", response_model=DashboardStatsResponse)
 def get_dashboard_stats(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Aggregate counts for the dashboard KPI strip.

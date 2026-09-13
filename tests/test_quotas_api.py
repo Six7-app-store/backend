@@ -212,7 +212,7 @@ def test_quota_overview_student_cannot_query_other_user_id_403(
 # ----------------------------------------------------------------
 @pytest.mark.integration
 def test_quota_overview_unauthenticated_401(unauth_client):
-    """No auth override is installed → ``get_current_user_keycloak``
+    """No auth override is installed → ``get_current_user``
     runs for real and must reject the request with 401."""
     with patch("app.routers.quotas.openstack.connect") as mocked_connect:
         response = unauth_client.get("/quotas/overview")

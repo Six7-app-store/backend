@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import User
 from app.services import openstack_client
-from app.utils.keycloak_auth import get_current_user_keycloak
+from app.utils.auth import get_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +87,7 @@ def _list_with_oserror(
 @router.post("/refresh", status_code=status.HTTP_204_NO_CONTENT)
 def refresh_cache(
     kind: str | None = Query(default=None, description="Optional: nur diese Resource-Art invalidieren"),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Cache bust for the calling user. Triggered by a click on the
@@ -106,7 +106,7 @@ def refresh_cache(
 @router.get("/networks")
 def list_networks(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     """Lists all networks that the user can see in their project.
 
@@ -137,7 +137,7 @@ def list_networks(
 def list_subnets(
     network_id: str | None = Query(default=None, description="Filter: nur Subnets in diesem Network"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     """
     With ``network_id``: subnets of that network. Without: all subnets in
@@ -175,7 +175,7 @@ def list_subnets(
 @router.get("/flavors")
 def list_flavors(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Compute flavors with the three spec fields the user really wants
@@ -210,7 +210,7 @@ def list_images(
         description="OS Image Status (default: active). Alle Stati: 'all'",
     ),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Default ``status=active`` — we do not want to show "queued" or
@@ -245,7 +245,7 @@ def list_images(
 @router.get("/keypairs")
 def list_keypairs(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     """
     SSH keypairs of the user. Here the identity is always the ``name``,
@@ -275,7 +275,7 @@ def list_keypairs(
 @router.get("/security-groups")
 def list_security_groups(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     def fetch() -> list[dict]:
         with openstack_client.user_connection(db, current_user) as conn:
@@ -297,7 +297,7 @@ def list_security_groups(
 @router.get("/floating-ip-pools")
 def list_floating_ip_pools(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     """
     There is no dedicated ``Pool`` resource in OpenStack — pools are
@@ -327,7 +327,7 @@ def list_floating_ip_pools(
 @router.get("/volumes")
 def list_volumes(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Cinder volumes. The frontend filters ``status`` itself if needed
@@ -357,7 +357,7 @@ def list_volumes(
 @router.get("/routers")
 def list_routers(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     def fetch() -> list[dict]:
         with openstack_client.user_connection(db, current_user) as conn:
@@ -384,7 +384,7 @@ def list_availability_zones(
         description="OpenStack-Service: compute (Nova), network (Neutron), volume (Cinder)",
     ),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     """
     AZs differ per service. Default: compute (Nova), because that is

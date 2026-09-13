@@ -328,7 +328,7 @@ def test_download_endpoint_member_403(
     # mapping, so we attach the student via UserToDeployment.
     from app.main import app as fastapi_app
     from app.models import UserToDeployment
-    from app.utils.keycloak_auth import get_current_user_keycloak
+    from app.utils.auth import get_current_user
 
     student = User(
         userId=uuid.uuid4(),
@@ -349,7 +349,7 @@ def test_download_endpoint_member_403(
 
     # Member access: download must 403 even though the deployment is
     # readable (read-access is a separate gate).
-    fastapi_app.dependency_overrides[get_current_user_keycloak] = lambda: student
+    fastapi_app.dependency_overrides[get_current_user] = lambda: student
     try:
         resp = client.get(
             f"/deployments/{create['deploymentId']}/files/task_pdf/all"
@@ -357,5 +357,5 @@ def test_download_endpoint_member_403(
     finally:
         # Hand back to the test client's mock_user so other tests
         # in the same session aren't affected.
-        fastapi_app.dependency_overrides[get_current_user_keycloak] = lambda: mock_user
+        fastapi_app.dependency_overrides[get_current_user] = lambda: mock_user
     assert resp.status_code == 403

@@ -269,13 +269,13 @@ def test_list_resources_owner_only(
 
     # Re-patch the auth to the student
     from app.main import app
-    from app.utils.keycloak_auth import get_current_user_keycloak
+    from app.utils.auth import get_current_user
 
-    app.dependency_overrides[get_current_user_keycloak] = lambda: mock_student
+    app.dependency_overrides[get_current_user] = lambda: mock_student
     try:
         response = client.get(f"/deployments/{deployment.deploymentId}/resources")
     finally:
-        app.dependency_overrides[get_current_user_keycloak] = lambda: mock_user
+        app.dependency_overrides[get_current_user] = lambda: mock_user
     assert response.status_code == 403
 
 

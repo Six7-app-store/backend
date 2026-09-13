@@ -66,7 +66,7 @@ from app.models import (  # noqa: F401  (importiert für seitliche Effekte / Met
     User,
     UserRole,
 )
-from app.utils.keycloak_auth import get_current_user_keycloak
+from app.utils.auth import get_current_user
 
 # ----------------------------------------------------------------
 # Engine — einmal pro Test-Prozess.
@@ -236,7 +236,7 @@ def _make_client(user):
         return user
 
     app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[get_current_user_keycloak] = override_get_current_user
+    app.dependency_overrides[get_current_user] = override_get_current_user
     return TestClient(app)
 
 
@@ -256,7 +256,7 @@ def client(mock_user):
         return mock_user
 
     app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[get_current_user_keycloak] = override_get_current_user
+    app.dependency_overrides[get_current_user] = override_get_current_user
 
     with TestClient(app) as c:
         yield c

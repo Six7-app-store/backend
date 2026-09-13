@@ -26,13 +26,13 @@ from app.schemas import (
 )
 from app.services.git_service import git_service
 from app.utils.app_image import build_image_data_url, parse_image_data_url
+from app.utils.auth import get_current_user
 from app.utils.capabilities import (
     ensure_delete_app,
     ensure_edit_app,
     ensure_submit_app_version,
     ensure_view_app,
 )
-from app.utils.keycloak_auth import get_current_user_keycloak
 
 logger = logging.getLogger(__name__)
 
@@ -1317,7 +1317,7 @@ def list_apps(
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak)
+    current_user: User = Depends(get_current_user)
 ):
     """List apps visible to the current user.
 
@@ -1339,7 +1339,7 @@ def list_apps(
 def get_app(
     app_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak)
+    current_user: User = Depends(get_current_user)
 ):
     """Get app by ID with available versions.
 
@@ -1472,7 +1472,7 @@ def get_app_variables(
     app_id: UUID,
     version: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Get dynamic app variables from app's Git repository
@@ -1521,7 +1521,7 @@ def get_app_variables(
 def create_app(
     app: AppCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Create a new app
@@ -1569,7 +1569,7 @@ def update_app(
     app_id: UUID,
     app_update: AppUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak)
+    current_user: User = Depends(get_current_user)
 ):
     """Update an app.
 
@@ -1612,7 +1612,7 @@ def submit_version(
     version_tag: str,
     body: AppVersionApprovalSubmit,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     """Submit a specific version tag for admin review.
 
@@ -1670,7 +1670,7 @@ def withdraw_version(
     app_id: UUID,
     version_tag: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     """Withdraw a PENDING version submission.
 
@@ -1696,7 +1696,7 @@ def withdraw_version(
 def list_version_approvals(
     app_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     """List all version approval entries for an app.
 
@@ -1718,7 +1718,7 @@ def list_version_approvals(
 def delete_app(
     app_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak)
+    current_user: User = Depends(get_current_user)
 ):
     """Soft-delete an app.
 

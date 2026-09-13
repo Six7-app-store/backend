@@ -8,7 +8,7 @@ from app.database import get_db
 from app.main import app as fastapi_app
 from app.models import User, UserRole
 from app.schemas import AppCreate
-from app.utils.keycloak_auth import get_current_user_keycloak
+from app.utils.auth import get_current_user
 from tests.conftest import TestingSessionLocal
 
 
@@ -120,7 +120,7 @@ def test_update_app_unauthorized_user_rejected(db, existing_app):
         finally:
             session.close()
 
-    fastapi_app.dependency_overrides[get_current_user_keycloak] = lambda: other_student
+    fastapi_app.dependency_overrides[get_current_user] = lambda: other_student
     fastapi_app.dependency_overrides[get_db] = override_get_db
     try:
         with TestClient(fastapi_app) as student_client:
@@ -167,7 +167,7 @@ def test_teacher_cannot_update_foreign_app(db, existing_app):
         finally:
             session.close()
 
-    fastapi_app.dependency_overrides[get_current_user_keycloak] = lambda: other_teacher
+    fastapi_app.dependency_overrides[get_current_user] = lambda: other_teacher
     fastapi_app.dependency_overrides[get_db] = override_get_db
     try:
         with TestClient(fastapi_app) as teacher_client:
@@ -203,7 +203,7 @@ def test_teacher_cannot_delete_foreign_app(db, existing_app):
         finally:
             session.close()
 
-    fastapi_app.dependency_overrides[get_current_user_keycloak] = lambda: other_teacher
+    fastapi_app.dependency_overrides[get_current_user] = lambda: other_teacher
     fastapi_app.dependency_overrides[get_db] = override_get_db
     try:
         with TestClient(fastapi_app) as teacher_client:
@@ -236,7 +236,7 @@ def test_admin_can_delete_foreign_app(db, existing_app):
         finally:
             session.close()
 
-    fastapi_app.dependency_overrides[get_current_user_keycloak] = lambda: admin
+    fastapi_app.dependency_overrides[get_current_user] = lambda: admin
     fastapi_app.dependency_overrides[get_db] = override_get_db
     try:
         with TestClient(fastapi_app) as admin_client:
@@ -276,7 +276,7 @@ def test_non_admin_cannot_change_user_role(db, mock_user):
             session.close()
 
     # mock_user has role TEACHER (see conftest).
-    fastapi_app.dependency_overrides[get_current_user_keycloak] = lambda: mock_user
+    fastapi_app.dependency_overrides[get_current_user] = lambda: mock_user
     fastapi_app.dependency_overrides[get_db] = override_get_db
     try:
         with TestClient(fastapi_app) as teacher_client:
@@ -328,7 +328,7 @@ def test_admin_can_change_user_role(db):
         finally:
             session.close()
 
-    fastapi_app.dependency_overrides[get_current_user_keycloak] = lambda: admin
+    fastapi_app.dependency_overrides[get_current_user] = lambda: admin
     fastapi_app.dependency_overrides[get_db] = override_get_db
     try:
         with TestClient(fastapi_app) as admin_client:
