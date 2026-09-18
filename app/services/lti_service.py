@@ -20,7 +20,15 @@ from pylti1p3.tool_config import ToolConfDict
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import IdentityProvider, LtiContext, User, UserIdentity, UserRole
+from app.crud import deployments as crud_deployments
+from app.models import (
+    CourseTeacher,
+    IdentityProvider,
+    LtiContext,
+    User,
+    UserIdentity,
+    UserRole,
+)
 from app.utils.lti_fastapi import RedisLaunchDataStorage
 from app.utils.time import utcnow
 
@@ -390,3 +398,74 @@ def record_context(db: Session, identity: LaunchIdentity) -> LtiContext | None:
     db.commit()
     db.refresh(context)
     return context
+
+
+# ----------------------------------------------------------------
+# WHERE A LAUNCH LANDS
+# ----------------------------------------------------------------
+# Frontend routes. Kept here as constants so the launch and its tests
+# name the same strings, and so a route rename shows up in one place.
+TARGET_DASHBOARD = "/dashboard"
+TARGET_ENVIRONMENTS = "/deployments"
+TARGET_MAP_COURSE = "/lti/kurs-zuordnen"
+
+
+def resolve_launch_target(
+    db: Session,
+    user: User,
+    context: LtiContext | None,
+) -> str:
+    """The path the frontend should open after a launch.
+
+    A student clicking a Moodle activity wants their environment, not a
+    dashboard. Returned as a relative path — the caller hands it to the
+    frontend, which refuses anything that is not one.
+
+    Staff land on their environments list, except when the Moodle course
+    has no mapping yet: then they are sent to the page that creates one,
+    because they are the only ones who can.
+
+    For a student the candidate set is every environment they are a
+    member of. When the Moodle course *is* mapped, it narrows that set
+    to environments owned by a teacher of the mapped course. Exactly one
+    survivor means we can open it directly; anything else falls back to
+    the list, which is honest rather than a guess.
+
+    Never raises. A launch that cannot be resolved still has to end in a
+    working session, so every failure path degrades to a valid page.
+    """
+    is_staff = user.role in (UserRole.TEACHER, UserRole.ADMIN)
+
+    if is_staff:
+        if context is not None and context.courseId is None:
+            return f"{TARGET_MAP_COURSE}?context={context.ltiContextId}"
+        return TARGET_ENVIRONMENTS
+
+    try:
+        candidates = crud_deployments.get_deployments(
+            db, limit=100, member_user_id=user.userId
+        )
+    except Exception:
+        # A broken lookup must not cost the user their session — they
+        # are signed in either way, they just land a page earlier.
+        logger.exception("Could not resolve launch target for user %s", user.userId)
+        return TARGET_DASHBOARD
+
+    if context is not None and context.courseId is not None:
+        teacher_ids = {
+            row[0]
+            for row in db.query(CourseTeacher.userId)
+            .filter(CourseTeacher.courseId == context.courseId)
+            .all()
+        }
+        # Only narrow when the mapping actually resolves to teachers.
+        # A mapped course with no teacher rows would otherwise empty the
+        # set and send an enrolled student to an empty list.
+        if teacher_ids:
+            narrowed = [d for d in candidates if d.userId in teacher_ids]
+            if narrowed:
+                candidates = narrowed
+
+    if len(candidates) == 1:
+        return f"{TARGET_ENVIRONMENTS}/{candidates[0].deploymentId}"
+    return TARGET_ENVIRONMENTS

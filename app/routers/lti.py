@@ -18,10 +18,11 @@ import logging
 import typing as t
 import uuid
 from urllib.parse import urlencode
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from pylti1p3.exception import LtiException, OIDCException
 from sqlalchemy.orm import Session
 from starlette.requests import Request as StarletteRequest
@@ -29,7 +30,7 @@ from starlette.responses import Response
 
 from app.config import settings
 from app.database import get_db
-from app.models import IdentityProvider, User, UserIdentity
+from app.models import Course, IdentityProvider, LtiContext, User, UserIdentity
 from app.services.lti_service import (
     LtiConfigurationError,
     LtiProvisioningError,
@@ -40,8 +41,10 @@ from app.services.lti_service import (
     get_tool_jwks,
     provision_user,
     record_context,
+    resolve_launch_target,
 )
-from app.utils.auth import get_current_keycloak_user
+from app.utils.auth import get_current_keycloak_user, get_current_user
+from app.utils.capabilities import ensure_edit_course, ensure_view_course_detail
 from app.utils.lti_fastapi import (
     FastApiMessageLaunch,
     FastApiOIDCLogin,
@@ -61,6 +64,23 @@ router = APIRouter()
 
 class LtiLinkRequest(BaseModel):
     challenge: str = Field(min_length=1)
+
+
+class LtiContextMapRequest(BaseModel):
+    """Which local course a Moodle course belongs to. ``None`` unmaps."""
+
+    courseId: UUID | None = None
+
+
+class LtiContextResponse(BaseModel):
+    ltiContextId: UUID
+    issuer: str
+    context_id: str
+    title: str | None = None
+    label: str | None = None
+    courseId: UUID | None = None
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ----------------------------------------------------------------
@@ -278,7 +298,7 @@ async def lti_launch(
             detail={"code": e.code, "message": e.message},
         ) from e
 
-    record_context(db, identity)
+    context = record_context(db, identity)
 
     try:
         token = create_session_token(
@@ -308,8 +328,16 @@ async def lti_launch(
     # a third-party cookie and is dropped in exactly the frame case
     # this has to work in. The frontend takes the token out of the URL
     # and clears it from the history entry.
+    # Where this launch should land. A student clicking a Moodle
+    # activity wants their environment, not a dashboard they then have
+    # to navigate out of.
+    target = resolve_launch_target(db, user, context)
+
     separator = "&" if "?" in settings.LTI_LAUNCH_REDIRECT_URL else "?"
-    location = f"{settings.LTI_LAUNCH_REDIRECT_URL}{separator}{urlencode({'token': token})}"
+    location = (
+        f"{settings.LTI_LAUNCH_REDIRECT_URL}{separator}"
+        f"{urlencode({'token': token, 'target': target})}"
+    )
     return RedirectResponse(location, status_code=302)
 
 
@@ -397,3 +425,86 @@ def lti_link(
         "Linked Moodle identity (iss=%s, sub=%s) to user %s", issuer, subject, user.userId
     )
     return {"status": "linked"}
+
+
+# ----------------------------------------------------------------
+# CONTEXT MAPPING
+# ----------------------------------------------------------------
+def _load_context(db: Session, lti_context_id: UUID) -> LtiContext:
+    context = db.get(LtiContext, lti_context_id)
+    if context is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "lti_context_not_found", "message": "Unknown Moodle course"},
+        )
+    return context
+
+
+@router.get("/contexts/{lti_context_id}", response_model=LtiContextResponse)
+def get_lti_context(
+    lti_context_id: UUID,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> LtiContext:
+    """Read one recorded Moodle course and its mapping.
+
+    Reachable with an LTI session, because the teacher who needs it
+    arrives straight from a launch and has no other one.
+    """
+    _require_lti_enabled()
+    ensure_view_course_detail(user)
+    return _load_context(db, lti_context_id)
+
+
+@router.put("/contexts/{lti_context_id}", response_model=LtiContextResponse)
+def map_lti_context(
+    lti_context_id: UUID,
+    payload: LtiContextMapRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> LtiContext:
+    """Attach a Moodle course to a local course, or detach it.
+
+    A launch records which Moodle course it came from but deliberately
+    leaves the mapping empty — a Moodle course and a Studiengruppe are
+    different things, and guessing an equivalence attaches people to the
+    wrong group. Somebody who teaches the course has to say so, which is
+    what this endpoint is.
+
+    The mapping is what lets a student launch resolve to one environment
+    instead of a list. It is a narrowing hint, never an access grant:
+    every deployment the student then sees still passes the same
+    membership checks as through the normal UI.
+    """
+    _require_lti_enabled()
+    context = _load_context(db, lti_context_id)
+
+    if payload.courseId is not None:
+        course = db.get(Course, payload.courseId)
+        if course is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "course_not_found", "message": "Unknown course"},
+            )
+        # Rights over the course you are mapping ONTO.
+        ensure_edit_course(user, course, db)
+    elif context.courseId is not None:
+        # Detaching: rights over the course it is currently attached to,
+        # so a teacher cannot undo a colleague's mapping.
+        current = db.get(Course, context.courseId)
+        if current is not None:
+            ensure_edit_course(user, current, db)
+    else:
+        ensure_view_course_detail(user)
+
+    context.courseId = payload.courseId
+    db.commit()
+    db.refresh(context)
+    logger.info(
+        "Moodle course (iss=%s, context=%s) mapped to course %s by user %s",
+        context.issuer,
+        context.context_id,
+        context.courseId,
+        user.userId,
+    )
+    return context

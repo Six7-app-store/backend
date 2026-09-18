@@ -292,6 +292,28 @@ def test_valid_launch_creates_user_identity_and_context(
     assert context.courseId is None
 
 
+def test_the_launch_redirect_carries_where_to_land(
+    unauth_client, lti_env, launch_store, platform_keys
+):
+    """The callback needs more than a token.
+
+    A student arriving from Moodle should end up at their environment,
+    so the launch computes the destination and hands it over. This one
+    has no environment yet, so it is the list — the narrowing itself is
+    covered in ``test_lti_launch_target.py``.
+    """
+    _seed_nonce(launch_store, "nonce-target")
+    token = _id_token(platform_keys[0], lti_env["kid"], nonce="nonce-target")
+
+    resp = _launch(unauth_client, token, state="state-target")
+
+    assert resp.status_code == 302
+    query = parse_qs(urlparse(resp.headers["location"]).query)
+    assert query["target"] == ["/deployments"]
+    # The session token still travels alongside it.
+    assert query["token"]
+
+
 def test_second_launch_reuses_the_same_user(
     unauth_client, lti_env, launch_store, platform_keys, db
 ):
@@ -312,7 +334,9 @@ def test_session_token_authenticates_against_the_normal_api(
     token = _id_token(platform_keys[0], lti_env["kid"], nonce="nonce-me")
 
     location = _launch(unauth_client, token).headers["location"]
-    session_token = location.split("token=", 1)[1]
+    # Parsed, not split: the redirect carries the landing target next to
+    # the token, and a ``split("token=")`` would swallow it into the JWT.
+    session_token = parse_qs(urlparse(location).query)["token"][0]
 
     claims = jwt.decode(
         session_token, settings.LTI_SESSION_SECRET, algorithms=["HS256"], issuer=SESSION_ISSUER
