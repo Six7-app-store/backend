@@ -7,7 +7,7 @@ from app.crud import teams as crud_teams
 from app.database import get_db
 from app.models import User
 from app.schemas import TeamCreate, TeamResponse, TeamUpdate, TeamWithMembers
-from app.utils.keycloak_auth import get_current_user_keycloak
+from app.utils.auth import get_current_user
 from app.utils.permissions import require_staff
 
 router = APIRouter()
@@ -22,7 +22,7 @@ def list_teams(
     limit: int = 100,
     deployment_id: UUID | None = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Get all teams, optionally filtered to a single deployment.
@@ -41,7 +41,7 @@ def list_teams(
 def get_team(
     team_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak)
+    current_user: User = Depends(get_current_user)
 ):
     """Get team by ID with all members"""
     team = crud_teams.get_team(db, team_id)

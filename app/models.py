@@ -60,6 +60,11 @@ class OpenStackAuthType(str, enum.Enum):
     PASSWORD = "password"
 
 
+class IdentityProvider(str, enum.Enum):
+    KEYCLOAK = "keycloak"
+    LTI = "lti"
+
+
 # ----------------------------------------------------------------
 # COURSE MODEL
 # ----------------------------------------------------------------
@@ -71,6 +76,9 @@ class Course(Base):
 
     # Relationships
     users = relationship("User", back_populates="course")
+    # Moodle course contexts that were mapped onto this course. Empty
+    # for every course until somebody maps one — see ``LtiContext``.
+    lti_contexts = relationship("LtiContext", back_populates="course")
     # Many-to-many to User via the ``course_teachers`` join table:
     # a course can have several teachers and a teacher several courses.
     # Backs the ``is_course_teacher`` capability check.
@@ -114,6 +122,12 @@ class User(Base):
         "UserOpenStackCredential",
         back_populates="user",
         uselist=False,
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    identities = relationship(
+        "UserIdentity",
+        back_populates="user",
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
@@ -410,3 +424,81 @@ class CourseTeacher(Base):
     # Relationships
     course = relationship("Course", back_populates="course_teachers")
     user = relationship("User", back_populates="course_teacher_links")
+
+
+# ----------------------------------------------------------------
+# USER IDENTITY MODEL
+# ----------------------------------------------------------------
+# One row per external account a user can sign in with. An LTI
+# ``sub`` is only unique *within one platform*, so the identity is the
+# triple (provider, issuer, subject) — never the subject alone.
+#
+# A column per provider on ``User`` would have been the shorter route,
+# but it stops working at the second Moodle instance, and the project
+# is required to support two sign-in paths already. ``User.keycloak_id``
+# stays where it is for now; migrating it into this table is a separate,
+# self-contained change.
+class UserIdentity(Base):
+    __tablename__ = "user_identities"
+
+    identityId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    userId = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.userId", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    provider = Column(Enum(IdentityProvider), nullable=False)
+    # The issuing system. For LTI this is the platform's ``iss``, i.e.
+    # Moodle's wwwroot.
+    issuer = Column(String, nullable=False)
+    # The provider's own identifier for the user (``sub``).
+    subject = Column(String, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    last_login_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider", "issuer", "subject", name="uq_user_identity_provider_subject"
+        ),
+    )
+
+    # Relationships
+    user = relationship("User", back_populates="identities")
+
+
+# ----------------------------------------------------------------
+# LTI CONTEXT MODEL
+# ----------------------------------------------------------------
+# A Moodle course, recorded as its own entity.
+#
+# Deliberately NOT folded into ``Course``: a ``Course`` here is a
+# Studiengruppe, which is not the same thing as a Moodle course, and
+# equating them automatically would assert a mapping nobody has
+# confirmed. ``courseId`` is therefore nullable and stays empty until
+# somebody maps it on purpose.
+class LtiContext(Base):
+    __tablename__ = "lti_contexts"
+
+    ltiContextId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # Platform ``iss`` — the same value as in ``UserIdentity.issuer``.
+    issuer = Column(String, nullable=False)
+    # The platform's own course id (the ``context`` claim's ``id``).
+    context_id = Column(String, nullable=False)
+    title = Column(String, nullable=True)
+    label = Column(String, nullable=True)
+    courseId = Column(
+        UUID(as_uuid=True),
+        ForeignKey("courses.courseId", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("issuer", "context_id", name="uq_lti_context_issuer_context"),
+    )
+
+    # Relationships
+    course = relationship("Course", back_populates="lti_contexts")

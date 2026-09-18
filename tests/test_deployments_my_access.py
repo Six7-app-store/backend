@@ -126,8 +126,8 @@ def test_my_access_member_gets_own_account(client, db, mock_user, mock_student):
     )
 
     from app.main import app as fastapi_app
-    from app.utils.keycloak_auth import get_current_user_keycloak
-    fastapi_app.dependency_overrides[get_current_user_keycloak] = lambda: mock_student
+    from app.utils.auth import get_current_user
+    fastapi_app.dependency_overrides[get_current_user] = lambda: mock_student
 
     response = client.get(f"/deployments/{deployment.deploymentId}/my-access")
 
@@ -156,8 +156,8 @@ def test_my_access_never_leaks_teammate_credentials(client, db, mock_user, mock_
     )
 
     from app.main import app as fastapi_app
-    from app.utils.keycloak_auth import get_current_user_keycloak
-    fastapi_app.dependency_overrides[get_current_user_keycloak] = lambda: mock_student
+    from app.utils.auth import get_current_user
+    fastapi_app.dependency_overrides[get_current_user] = lambda: mock_student
 
     response = client.get(f"/deployments/{deployment.deploymentId}/my-access")
 
@@ -191,8 +191,8 @@ def test_my_access_empty_when_no_successful_deploy(client, db, mock_user, mock_s
     )
 
     from app.main import app as fastapi_app
-    from app.utils.keycloak_auth import get_current_user_keycloak
-    fastapi_app.dependency_overrides[get_current_user_keycloak] = lambda: mock_student
+    from app.utils.auth import get_current_user
+    fastapi_app.dependency_overrides[get_current_user] = lambda: mock_student
 
     response = client.get(f"/deployments/{deployment.deploymentId}/my-access")
 

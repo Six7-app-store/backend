@@ -225,8 +225,34 @@ def test_ensure_approve_app_version_raises(teacher):
 
 
 # ================================================================
-# DEPLOYMENTS — view_member / view_owner / operate / resend
+# DEPLOYMENTS — create / view_member / view_owner / operate / resend
 # ================================================================
+@pytest.mark.parametrize(
+    "role,expected",
+    [
+        (UserRole.STUDENT, False),
+        (UserRole.TEACHER, True),
+        (UserRole.ADMIN, True),
+    ],
+)
+def test_can_create_deployment(role, expected):
+    """Creating a deployment is staff work; students are handed one."""
+    assert caps.can_create_deployment(_user(role)) is expected
+
+
+def test_ensure_create_deployment_raises_role_required(student):
+    with pytest.raises(HTTPException) as exc:
+        caps.ensure_create_deployment(student)
+    assert exc.value.status_code == 403
+    assert exc.value.detail["code"] == "role_required"
+    assert set(exc.value.detail["required"]) == {"teacher", "admin"}
+
+
+def test_ensure_create_deployment_passes_for_staff(teacher, admin):
+    caps.ensure_create_deployment(teacher)
+    caps.ensure_create_deployment(admin)
+
+
 class TestCanViewDeploymentMember:
     """Mirrors ``has_deployment_access`` — owner, staff, team, direct."""
 

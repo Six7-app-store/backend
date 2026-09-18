@@ -10,7 +10,7 @@ endpoint ``PUT /apps/{app_id}`` with ``is_private=False``.
 
 Auth-Context-Switching: ``admin_client`` und ``student_client`` aus
 ``conftest.py`` mutieren beide den **gleichen** globalen Slot
-``app.dependency_overrides[get_current_user_keycloak]``. Wenn ein Test
+``app.dependency_overrides[get_current_user]``. Wenn ein Test
 beide Fixtures gleichzeitig anfordert, gewinnt die zuletzt aufgelöste
 Fixture — alle nachfolgenden Requests laufen dann als deren User,
 unabhängig davon, ob sie über ``admin_client`` oder ``student_client``
@@ -31,7 +31,7 @@ from app.models import (
     AppVersionApprovalStatus,
     Deployment,
 )
-from app.utils.keycloak_auth import get_current_user_keycloak
+from app.utils.auth import get_current_user
 from tests.conftest import create_app_in_db
 
 
@@ -53,14 +53,14 @@ def _approve_version(db, app_id, reviewer_id, version_tag="v1.0.0"):
 
 
 def _as(user):
-    """Swap the active ``get_current_user_keycloak`` override.
+    """Swap the active ``get_current_user`` override.
 
     Workaround für die Fixture-Override-Kollision (siehe Modul-
     Docstring): ein Test kann nicht zwei Clients gleichzeitig
     anfordern, weil beide am selben globalen Slot drehen. Stattdessen
     nehmen wir einen Client und tauschen den Auth-Kontext zwischen
     Requests aus."""
-    fastapi_app.dependency_overrides[get_current_user_keycloak] = lambda: user
+    fastapi_app.dependency_overrides[get_current_user] = lambda: user
 
 
 # ----------------------------------------------------------------

@@ -146,6 +146,22 @@ def ensure_approve_app_version(user: User) -> None:
 # ================================================================
 # DEPLOYMENTS
 # ================================================================
+def can_create_deployment(user: User) -> bool:
+    """Whether ``user`` may create a deployment at all.
+
+    Staff only. Students receive access to an environment a teacher set
+    up for them; they never create one themselves. This is the coarse
+    role gate — the per-app visibility rule (private app, unapproved
+    version) still applies on top via :func:`ensure_view_app`.
+    """
+    return _is_staff(user)
+
+
+def ensure_create_deployment(user: User) -> None:
+    if not can_create_deployment(user):
+        raise _forbidden("role_required", [r.value for r in STAFF_ROLES])
+
+
 def can_view_deployment_member(user: User, dep: Deployment, db: Session) -> bool:
     """Member-view access to a deployment.
 

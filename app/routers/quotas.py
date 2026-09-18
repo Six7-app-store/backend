@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.crud import openstack_credentials as crud_creds
 from app.database import get_db
 from app.models import User
-from app.utils.keycloak_auth import get_current_user_keycloak
+from app.utils.auth import get_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +98,7 @@ def _get_openstack_conn_for_user(db: Session, user: User):
 @router.get("/overview", response_model=QuotaOverviewResponse)
 def get_quota_overview(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Fetch the OpenStack quota overview for compute, storage and network

@@ -1,0 +1,45 @@
+{
+  "enabledPlugins": {
+    "context7@claude-plugins-official": true
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "P=$(command -v python || command -v python3); [ -n \"$P\" ] && \"$P\" .claude/hooks/agent_guard.py pre; exit 0",
+            "timeout": 15,
+            "statusMessage": "Migrationsschutz"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "P=$(command -v python || command -v python3); [ -n \"$P\" ] && \"$P\" .claude/hooks/agent_guard.py lint; exit 0",
+            "timeout": 60,
+            "statusMessage": "ruff --fix"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "docker ps >/dev/null 2>&1 || exit 0; docker exec backend-dev poetry run ruff check . >/dev/null 2>&1 || printf '%s' '{\"decision\":\"block\",\"reason\":\"ruff meldet Fehler. Ausfuehren und beheben: docker exec backend-dev poetry run ruff check .\"}'; exit 0",
+            "timeout": 120,
+            "statusMessage": "Lint-Gate"
+          }
+        ]
+      }
+    ]
+  }
+}

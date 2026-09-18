@@ -9,9 +9,9 @@ from app.crud import users as crud_users
 from app.database import get_db
 from app.models import User, UserRole
 from app.schemas import UserResponse, UserStatistics, UserUpdate, UserWithCourse
+from app.utils.auth import get_current_user
 from app.utils.capabilities import ensure_change_user_role, ensure_view_user
 from app.utils.keycloak_auth import (
-    get_current_user_keycloak,
     get_keycloak_users_by_ids,
     search_keycloak_users,
 )
@@ -25,7 +25,7 @@ router = APIRouter()
 # GET CURRENT USER
 # ----------------------------------------------------------------
 @router.get("/me", response_model=UserWithCourse)
-def get_me(current_user: User = Depends(get_current_user_keycloak)):
+def get_me(current_user: User = Depends(get_current_user)):
     """Get current authenticated user with course information"""
     return current_user
 
@@ -136,7 +136,7 @@ def search_users_keycloak(
 def get_user(
     user_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Get user by ID
@@ -166,7 +166,7 @@ def get_user(
 def get_user_statistics(
     user_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Get user statistics
@@ -202,7 +202,7 @@ def update_user(
     user_id: UUID,
     user_update: UserUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak)
+    current_user: User = Depends(get_current_user)
 ):
     """Update a user record.
 

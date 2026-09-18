@@ -43,15 +43,16 @@ from app.services.deployment_status import (
     build_resource_views,
 )
 from app.services.tf_state_parser import parse_tf_state
+from app.utils.auth import get_current_user
 from app.utils.capabilities import (
     can_view_deployment_owner,
+    ensure_create_deployment,
     ensure_operate_deployment,
     ensure_resend_access,
     ensure_view_app,
     ensure_view_deployment_owner,
     get_my_course_teacher_ids,
 )
-from app.utils.keycloak_auth import get_current_user_keycloak
 from app.utils.permissions import (
     ensure_deployment_access,
     is_deployment_owner_view,
@@ -162,7 +163,7 @@ def list_deployments(
     scope: str | None = None,
     student: UUID | None = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak)
+    current_user: User = Depends(get_current_user)
 ):
     """List deployments visible to the caller.
 
@@ -273,7 +274,7 @@ def get_deployment(
     deployment_id: UUID,
     include_logs: bool = False,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Get deployment by ID with full details including:
@@ -877,7 +878,7 @@ def _file_var_metadata_only(value: dict) -> dict:
 def create_deployment(
     deployment: DeploymentCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Create a new deployment
@@ -890,6 +891,13 @@ def create_deployment(
     if it fails, the task row is flipped to FAILED so the deployment
     surfaces an honest error instead of hanging in PENDING forever.
     """
+    # Role gate first: creating deployments is staff work. A student
+    # gets access to an environment a teacher set up, they never create
+    # one. Checked before the app lookup so the 403 does not leak
+    # whether a given appId exists, and before the advisory lock so a
+    # rejected caller never takes it.
+    ensure_create_deployment(current_user)
+
     # Per-user lock — serializes against PUT /me/openstack-credentials
     # and any other concurrent POST /deployments from this user. Held
     # until the next COMMIT/ROLLBACK on this connection.
@@ -1075,7 +1083,7 @@ def create_deployment(
 def delete_deployment(
     deployment_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     """Unified delete — destroys OpenStack resources first if needed.
 
@@ -1424,7 +1432,7 @@ def list_deployment_resources(
     deployment_id: UUID,
     refresh: bool = True,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     """Stage-1 resource listing for the Infrastructure tab.
 
@@ -1468,7 +1476,7 @@ def get_deployment_resource_detail(
     deployment_id: UUID,
     address: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     """Stage-2 detail for one compute instance.
 
@@ -1517,7 +1525,7 @@ def redeploy_deployment_resource(
     deployment_id: UUID,
     address: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     """Replace one compute instance via ``terraform apply -replace=…``.
 
@@ -1610,7 +1618,7 @@ def _view_asdict(view) -> dict:
 def pause_deployment(
     deployment_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     """Pause a running deployment by stopping its compute instances.
 
@@ -1661,7 +1669,7 @@ def pause_deployment(
 def resume_deployment(
     deployment_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     """Resume a paused deployment by starting its compute instances."""
     deployment = crud_deployments.get_deployment_with_details(db, deployment_id)
@@ -1710,7 +1718,7 @@ def download_deployment_file(
     var_name: str,
     slot_key: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     """Stream the raw bytes of one wizard-uploaded file back to the owner.
 
@@ -1795,7 +1803,7 @@ def download_deployment_file(
 def get_my_access(
     deployment_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     """Return the calling member's OWN access credentials for a deployment.
 
@@ -1849,7 +1857,7 @@ def resend_access_credentials(
     team_id: UUID,
     user_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     """Re-send the per-user access mail for one team member.
 
@@ -1996,7 +2004,7 @@ async def stream_deployment_events(
     deployment_id: UUID,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak),
+    current_user: User = Depends(get_current_user),
 ):
     """Live progress + log stream for one deployment as Server-Sent Events.
 

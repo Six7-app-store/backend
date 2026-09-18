@@ -18,7 +18,7 @@ from app.models import (
     UserToDeployment,
     UserToTeam,
 )
-from app.utils.keycloak_auth import get_current_user_keycloak as get_current_user
+from app.utils.auth import get_current_user
 
 # ----------------------------------------------------------------
 # ROLE GROUPINGS

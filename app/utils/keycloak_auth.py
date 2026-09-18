@@ -5,19 +5,15 @@ Handles token validation and user management with Keycloak.
 import logging
 import threading
 
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi import HTTPException, status
 from jose import JWTError, jwt
 from keycloak import KeycloakAdmin, KeycloakAuthenticationError, KeycloakOpenID
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.database import get_db
 from app.models import User, UserRole
 
 logger = logging.getLogger(__name__)
-
-security = HTTPBearer()
 
 
 # ----------------------------------------------------------------
@@ -166,6 +162,24 @@ def sync_user_from_keycloak(db: Session, keycloak_user_data: dict) -> User:
 
     user = db.query(User).filter(User.keycloak_id == keycloak_id).first()
     if not user:
+        # An account for this person can already exist without a
+        # ``keycloak_id``: an LTI launch provisions by e-mail and has no
+        # Keycloak subject to store. Adopt that row instead of inserting
+        # a second one — ``users.email`` is UNIQUE, so the insert would
+        # raise ``IntegrityError`` on every authenticated request the
+        # person makes and lock them out of the Keycloak path for good.
+        user = db.query(User).filter(User.email == email).first()
+        if user:
+            logger.info(
+                "Linking Keycloak subject %s to the existing account for %s",
+                keycloak_id,
+                email,
+            )
+            user.keycloak_id = keycloak_id
+            db.commit()
+            db.refresh(user)
+
+    if not user:
         user = User(
             keycloak_id=keycloak_id,
             email=email,
@@ -203,39 +217,6 @@ def sync_user_from_keycloak(db: Session, keycloak_user_data: dict) -> User:
         db.commit()
         db.refresh(user)
     return user
-
-
-# ----------------------------------------------------------------
-# AUTH DEPENDENCY
-# ----------------------------------------------------------------
-def get_current_user_keycloak(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-    db: Session = Depends(get_db),
-) -> User:
-    """
-    Validate the bearer token and return the local User record.
-    JIT-provisions the user from Keycloak claims on first sight.
-    """
-    token_info = verify_keycloak_token_offline(credentials.credentials)
-
-    keycloak_id = token_info.get("sub")
-    if not keycloak_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token missing user ID (sub)",
-        )
-
-    return sync_user_from_keycloak(
-        db,
-        {
-            "id": keycloak_id,
-            "email": token_info.get("email"),
-            "username": token_info.get("preferred_username"),
-            "roles": token_info.get("realm_access", {}).get("roles", []),
-            "firstName": token_info.get("given_name"),
-            "lastName": token_info.get("family_name"),
-        },
-    )
 
 
 # ----------------------------------------------------------------

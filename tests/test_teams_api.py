@@ -44,7 +44,7 @@ from app.models import (
     UserRole,
     UserToTeam,
 )
-from app.utils.keycloak_auth import get_current_user_keycloak
+from app.utils.auth import get_current_user
 from tests.conftest import TestingSessionLocal
 
 
@@ -113,7 +113,7 @@ def _override(user: User) -> TestClient:
         finally:
             session.close()
 
-    fastapi_app.dependency_overrides[get_current_user_keycloak] = lambda: user
+    fastapi_app.dependency_overrides[get_current_user] = lambda: user
     fastapi_app.dependency_overrides[get_db] = override_get_db
     return TestClient(fastapi_app)
 

@@ -15,6 +15,7 @@ from app.routers import (
     courses,
     dashboard,
     deployments,
+    lti,
     openstack_credentials,
     openstack_resources,
     quotas,
@@ -119,6 +120,9 @@ app.add_middleware(
 # ROUTERS
 # ----------------------------------------------------------------
 app.include_router(auth_keycloak.router, prefix="/auth", tags=["Authentication"])
+# LTI 1.3 launch endpoints. Unauthenticated by design — they are the
+# entry point from Moodle and carry their own proof in the id_token.
+app.include_router(lti.router, prefix="/lti", tags=["LTI"])
 app.include_router(users.router, prefix="/users", tags=["Users"])
 app.include_router(courses.router, prefix="/courses", tags=["Courses"])
 app.include_router(apps.router, prefix="/apps", tags=["Apps"])
