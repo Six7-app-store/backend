@@ -46,6 +46,7 @@ from app.services.tf_state_parser import parse_tf_state
 from app.utils.auth import get_current_user
 from app.utils.capabilities import (
     can_view_deployment_owner,
+    ensure_create_deployment,
     ensure_operate_deployment,
     ensure_resend_access,
     ensure_view_app,
@@ -890,6 +891,13 @@ def create_deployment(
     if it fails, the task row is flipped to FAILED so the deployment
     surfaces an honest error instead of hanging in PENDING forever.
     """
+    # Role gate first: creating deployments is staff work. A student
+    # gets access to an environment a teacher set up, they never create
+    # one. Checked before the app lookup so the 403 does not leak
+    # whether a given appId exists, and before the advisory lock so a
+    # rejected caller never takes it.
+    ensure_create_deployment(current_user)
+
     # Per-user lock — serializes against PUT /me/openstack-credentials
     # and any other concurrent POST /deployments from this user. Held
     # until the next COMMIT/ROLLBACK on this connection.
