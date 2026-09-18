@@ -398,7 +398,7 @@ def test_create_deployment_rejects_student(db, mock_user):
         finally:
             session.close()
 
-    fastapi_app.dependency_overrides[get_current_user_keycloak] = lambda: student
+    fastapi_app.dependency_overrides[get_current_user] = lambda: student
     fastapi_app.dependency_overrides[get_db] = override_get_db
     try:
         with TestClient(fastapi_app) as student_client:
