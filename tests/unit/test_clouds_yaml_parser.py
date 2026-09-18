@@ -189,3 +189,159 @@ def test_parse_yaml_syntax_error_propagates_as_value_error():
 
     assert exc_info.value.status_code == 422
     assert exc_info.value.detail.startswith("Invalid YAML:")
+
+
+# ----------------------------------------------------------------
+# Remaining error branches
+#
+# Every one of these ends in ``_bad()`` and therefore a 422 whose detail
+# the UI renders verbatim. That is the whole contract of this parser, so
+# each branch is asserted on its message, not just on the status code.
+# ----------------------------------------------------------------
+def test_parse_empty_clouds_mapping_raises():
+    """``clouds:`` present but empty is a different mistake than a missing root."""
+    with pytest.raises(HTTPException) as exc:
+        parse("clouds: {}")
+
+    assert exc.value.status_code == 422
+    assert "no clouds defined" in exc.value.detail
+
+
+def test_parse_multi_cloud_without_name_lists_the_choices():
+    """Ambiguity must name the options - the user cannot guess our iteration order."""
+    yaml_text = textwrap.dedent(
+        """
+        clouds:
+          zeta:
+            auth_type: password
+            auth:
+              auth_url: https://keystone.example/v3
+              username: u
+              password: p
+              user_domain_name: Default
+              project_name: demo
+          alpha:
+            auth_type: password
+            auth:
+              auth_url: https://keystone.example/v3
+              username: u
+              password: p
+              user_domain_name: Default
+              project_name: demo
+        """
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        parse(yaml_text)
+
+    assert exc.value.status_code == 422
+    assert "specify cloud_name" in exc.value.detail
+    # sorted(), so the order is stable regardless of YAML order
+    assert "alpha, zeta" in exc.value.detail
+
+
+def test_parse_cloud_entry_that_is_not_a_mapping_raises():
+    """A scalar under the cloud name would otherwise blow up on ``.get``."""
+    with pytest.raises(HTTPException) as exc:
+        parse("clouds:\n  mycloud: just-a-string\n")
+
+    assert exc.value.status_code == 422
+    assert "is not a mapping" in exc.value.detail
+
+
+def test_parse_missing_auth_block_raises():
+    """No ``auth:`` at all - named separately from a malformed one."""
+    with pytest.raises(HTTPException) as exc:
+        parse("clouds:\n  mycloud:\n    region_name: RegionOne\n")
+
+    assert exc.value.status_code == 422
+    assert "missing 'auth:' block" in exc.value.detail
+
+
+def test_parse_missing_auth_url_raises():
+    """``auth_url`` is the one field with no sensible default."""
+    yaml_text = textwrap.dedent(
+        """
+        clouds:
+          mycloud:
+            auth_type: password
+            auth:
+              username: alice
+              password: s3cret
+        """
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        parse(yaml_text)
+
+    assert exc.value.status_code == 422
+    assert "auth.auth_url is required" in exc.value.detail
+
+
+def test_parse_application_credential_without_secret_raises():
+    """Horizon writes both fields; half of them means a truncated paste."""
+    yaml_text = textwrap.dedent(
+        """
+        clouds:
+          mycloud:
+            auth_type: v3applicationcredential
+            auth:
+              auth_url: https://keystone.example/v3
+              application_credential_id: abc123
+        """
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        parse(yaml_text)
+
+    assert exc.value.status_code == 422
+    assert "application_credential_secret" in exc.value.detail
+
+
+def test_parse_password_auth_without_password_raises():
+    """Same for the password flow - Horizon never fills in the password."""
+    yaml_text = textwrap.dedent(
+        """
+        clouds:
+          mycloud:
+            auth_type: password
+            auth:
+              auth_url: https://keystone.example/v3
+              username: alice
+              user_domain_name: Default
+              project_name: demo
+        """
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        parse(yaml_text)
+
+    assert exc.value.status_code == 422
+    assert "auth.username and auth.password" in exc.value.detail
+
+
+def test_parse_translates_a_schema_rejection_into_the_same_422():
+    """A Pydantic ValueError must not escape as a 500.
+
+    Password auth needs a project and a user domain. The YAML below is
+    well-formed and passes every check in this module, so the rejection
+    can only come from ``OpenStackCredentialUpsert`` - and it has to
+    arrive as the same 422 with a readable detail.
+    """
+    yaml_text = textwrap.dedent(
+        """
+        clouds:
+          mycloud:
+            auth_type: password
+            auth:
+              auth_url: https://keystone.example/v3
+              username: alice
+              password: s3cret
+        """
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        parse(yaml_text)
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail

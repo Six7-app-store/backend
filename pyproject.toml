@@ -141,6 +141,17 @@ addopts = [
     "--cov-report=term-missing",
     "--cov-report=html",
     "--cov-report=xml",
+    # Nimmt das Gate aus jedem pytest-Lauf heraus. Beide CI-Lanes sind
+    # Teillaeufe: ``-m unit`` waehlt 392 Tests ab und kommt auf 49.88 %,
+    # ``-m integration`` waehlt 371 ab und kommt auf 65.13 %. Kombiniert
+    # stehen wir bei 73.99 %. Die Schwelle in einer Lane zu pruefen misst
+    # nur, wie viel vom Gesamtcode zufaellig dort liegt - genau daran
+    # scheiterte der Unit-Job.
+    #
+    # ``coverage report``/``html`` im coverage-Job lesen ``addopts`` nicht
+    # und behalten damit ``fail_under`` weiter unten - dort, auf dem
+    # kombinierten Stand, gehoert das Gate hin.
+    "--cov-fail-under=0",
     # Globaler Per-Test-Timeout: kein einzelner Test darf den
     # Gesamtlauf einfrieren. 60 s ist großzügig für DB-Truncate +
     # FastAPI-TestClient-Lifecycle, aber knapp genug, dass ein
@@ -181,7 +192,18 @@ omit = [
 precision = 2
 show_missing = true
 skip_covered = false
-fail_under = 50
+# Ratsche gegen Degradation. Nie senken.
+#
+# Von 50 auf 70 gezogen: der kombinierte Lauf aus Unit- und
+# Integration-Lane steht bei 73.99 %. Die 50 waren nie erreichbar, wo
+# sie geprueft wurden - die Unit-Lane allein kam auf 49.46 %, weil sie
+# 392 Tests abwaehlt.
+#
+# Greift ausschliesslich im ``coverage``-Job auf dem kombinierten Stand:
+# ``coverage combine`` gefolgt von ``coverage report``/``html``. Die
+# pytest-Laeufe umgehen den Wert ueber ``--cov-fail-under=0`` in
+# ``addopts`` (Begruendung dort).
+fail_under = 70
 exclude_lines = [
     "pragma: no cover",
     "def __repr__",
