@@ -366,6 +366,59 @@ def test_list_deployments_student_sees_team_member_deployments(db, mock_user):
 
 
 # ---------------------------------------------------------------------------
+# Create — role gate
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_create_deployment_rejects_student(db, mock_user):
+    """A student must not be able to create a deployment.
+
+    Students are handed an environment a teacher set up for them. The
+    gate sits before the app lookup, so the 403 must arrive even for an
+    appId that does not exist — otherwise the endpoint would leak which
+    apps are present.
+    """
+    student = User(
+        userId=uuid.uuid4(),
+        keycloak_id="create-student",
+        email="creator@dhbw.de",
+        username="createstudent",
+        firstName="Create",
+        lastName="Student",
+        role=UserRole.STUDENT,
+    )
+    db.add(student)
+    db.commit()
+
+    def override_get_db():
+        session = TestingSessionLocal()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    fastapi_app.dependency_overrides[get_current_user_keycloak] = lambda: student
+    fastapi_app.dependency_overrides[get_db] = override_get_db
+    try:
+        with TestClient(fastapi_app) as student_client:
+            response = student_client.post(
+                "/deployments/",
+                json={
+                    "name": "student-attempt",
+                    "appId": str(uuid.uuid4()),
+                    "releaseTag": "main",
+                },
+            )
+        assert response.status_code == 403
+        detail = response.json()["detail"]
+        assert detail["code"] == "role_required"
+        assert set(detail["required"]) == {"teacher", "admin"}
+    finally:
+        fastapi_app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
 # Pure helper — derive_status
 # ---------------------------------------------------------------------------
 
