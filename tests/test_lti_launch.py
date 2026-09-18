@@ -908,3 +908,82 @@ def test_a_link_challenge_is_not_a_session_token(
     resp = unauth_client.get("/users/me", headers={"Authorization": f"Bearer {challenge}"})
 
     assert resp.status_code == 401
+
+
+# ================================================================
+# H-9 REGRESSION — account takeover via unverified email
+# ================================================================
+def test_keycloak_unverified_email_cannot_adopt_lti_account(db):
+    """An attacker who registers in Keycloak with a victim's email address
+    must NOT be able to adopt the victim's LTI-provisioned account when
+    ``email_verified`` is False or absent.
+
+    Before the fix, ``sync_user_from_keycloak`` would find the existing row
+    by email and silently link the attacker's Keycloak subject to it —
+    handing them the victim's deployments, credentials, and team memberships.
+    """
+    # Victim account created by a prior LTI launch (no keycloak_id).
+    from app.models import User, UserRole
+    victim = User(
+        email="victim@dhbw.de",
+        username="victim",
+        role=UserRole.STUDENT,
+    )
+    db.add(victim)
+    db.commit()
+    db.refresh(victim)
+
+    # Attacker signs in via Keycloak with the same email, but WITHOUT
+    # email verification.
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc_info:
+        sync_user_from_keycloak(
+            db,
+            {
+                "id": "attacker-kc-sub",
+                "email": "victim@dhbw.de",
+                "email_verified": False,
+                "username": "attacker",
+                "realm_access": {"roles": ["student"]},
+            },
+        )
+
+    assert exc_info.value.status_code == 403
+    detail = exc_info.value.detail
+    assert detail.get("code") == "email_not_verified"
+
+    # The victim row must be untouched — no keycloak_id written.
+    db.refresh(victim)
+    assert victim.keycloak_id is None
+    assert db.query(User).count() == 1
+
+
+def test_keycloak_verified_email_can_adopt_lti_account(db):
+    """When ``email_verified`` is True the adoption is allowed — this is
+    the legitimate first Keycloak sign-in for a user who was provisioned
+    by an earlier LTI launch.
+    """
+    from app.models import User, UserRole
+    existing = User(
+        email="legit@dhbw.de",
+        username="legit",
+        role=UserRole.STUDENT,
+    )
+    db.add(existing)
+    db.commit()
+    db.refresh(existing)
+
+    synced = sync_user_from_keycloak(
+        db,
+        {
+            "id": "kc-sub-legit",
+            "email": "legit@dhbw.de",
+            "email_verified": True,
+            "username": "legit",
+            "realm_access": {"roles": ["student"]},
+        },
+    )
+
+    assert synced.userId == existing.userId
+    assert synced.keycloak_id == "kc-sub-legit"
+    assert db.query(User).count() == 1

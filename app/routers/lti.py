@@ -494,6 +494,14 @@ def map_lti_context(
         current = db.get(Course, context.courseId)
         if current is not None:
             ensure_edit_course(user, current, db)
+        else:
+            # The mapped course was deleted. We no longer have a Course
+            # object to check editor rights against, but we must still
+            # gate the detach — skip-on-None would let any authenticated
+            # user (including a student) clear the mapping. Fall back to
+            # the staff-level check: only teachers and admins may act on
+            # an orphaned context.
+            ensure_view_course_detail(user)
     else:
         ensure_view_course_detail(user)
 

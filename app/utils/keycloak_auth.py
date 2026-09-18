@@ -168,16 +168,38 @@ def sync_user_from_keycloak(db: Session, keycloak_user_data: dict) -> User:
         # a second one — ``users.email`` is UNIQUE, so the insert would
         # raise ``IntegrityError`` on every authenticated request the
         # person makes and lock them out of the Keycloak path for good.
-        user = db.query(User).filter(User.email == email).first()
-        if user:
-            logger.info(
-                "Linking Keycloak subject %s to the existing account for %s",
+        #
+        # Only adopt when the email address is verified in Keycloak.
+        # Keycloak does not require verification by default, so an
+        # attacker who registers with a victim's address would otherwise
+        # gain full access to the victim's existing account on first
+        # sign-in.
+        email_verified = keycloak_user_data.get("email_verified", False)
+        if email_verified:
+            user = db.query(User).filter(User.email == email).first()
+            if user:
+                logger.info(
+                    "Linking Keycloak subject %s to the existing account for %s",
+                    keycloak_id,
+                    email,
+                )
+                user.keycloak_id = keycloak_id
+                db.commit()
+                db.refresh(user)
+        elif db.query(User).filter(User.email == email).first():
+            logger.warning(
+                "Refusing to link Keycloak subject %s to existing account for %s: "
+                "email not verified in Keycloak",
                 keycloak_id,
                 email,
             )
-            user.keycloak_id = keycloak_id
-            db.commit()
-            db.refresh(user)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "email_not_verified",
+                    "message": "Verify your email address in Keycloak before signing in.",
+                },
+            )
 
     if not user:
         user = User(

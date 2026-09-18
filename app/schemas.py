@@ -1,8 +1,11 @@
+import ipaddress
+import socket
 from datetime import datetime
-from typing import Any, Literal, Optional
+from typing import Any, Literal
+from urllib.parse import urlparse
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from app.models import AppVersionApprovalStatus, OpenStackAuthType, TaskStatus, TaskType, UserRole
 
@@ -40,7 +43,7 @@ class UserResponse(UserBase):
 
 
 class UserWithCourse(UserResponse):
-    course: Optional["CourseResponse"] = None
+    course: "CourseResponse | None" = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -90,11 +93,69 @@ class CourseMembersUpdate(BaseModel):
 # ----------------------------------------------------------------
 # APP SCHEMAS
 # ----------------------------------------------------------------
+# Private IP ranges that must never be reachable via git_link to
+# prevent SSRF. Includes RFC-1918, loopback, link-local, and the
+# IANA-reserved 100.64/10 (CGN) block.
+_PRIVATE_NETWORKS = [
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+]
+
+
+def _is_private_host(hostname: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(socket.gethostbyname(hostname))
+        return any(addr in net for net in _PRIVATE_NETWORKS)
+    except (socket.gaierror, ValueError):
+        # Cannot resolve or not an IP literal — let the git client
+        # handle it; we have blocked the obvious SSRF vectors.
+        return False
+
+
 class AppBase(BaseModel):
     name: str
     description: str | None = None
     git_link: str | None = None
     is_private: bool = False
+
+    @field_validator("git_link")
+    @classmethod
+    def validate_git_link(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        # git@ SSH URLs (e.g. git@github.com:owner/repo.git) are handled
+        # specially: urlparse does not recognise them as having a scheme.
+        if v.startswith("git@"):
+            # Extract hostname from git@<host>:path
+            try:
+                host_part = v[4:].split(":")[0]
+            except IndexError:
+                raise ValueError("Invalid git@ URL format")
+            if _is_private_host(host_part):
+                raise ValueError(
+                    "git_link must point to a public host; private/internal "
+                    "addresses are not allowed"
+                )
+            return v
+        parsed = urlparse(v)
+        if parsed.scheme not in ("https",):
+            raise ValueError(
+                "git_link must use https:// (or git@ SSH) — plain HTTP is not allowed"
+            )
+        hostname = parsed.hostname or ""
+        if _is_private_host(hostname):
+            raise ValueError(
+                "git_link must point to a public host; private/internal "
+                "addresses are not allowed"
+            )
+        return v
 
 
 class AppCreate(AppBase):

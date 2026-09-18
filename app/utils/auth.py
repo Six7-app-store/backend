@@ -80,6 +80,7 @@ def _user_from_keycloak(db: Session, token: str) -> User:
         {
             "id": keycloak_id,
             "email": token_info.get("email"),
+            "email_verified": token_info.get("email_verified", False),
             "username": token_info.get("preferred_username"),
             "roles": token_info.get("realm_access", {}).get("roles", []),
             "firstName": token_info.get("given_name"),

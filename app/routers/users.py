@@ -4,7 +4,6 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.crud import apps as crud_apps
 from app.crud import deployments as crud_deployments
 from app.crud import users as crud_users
 from app.database import get_db

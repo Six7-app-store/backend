@@ -1,11 +1,13 @@
 """Git service for repository management and release information retrieval."""
 
+import ipaddress
 import logging
 import re
 import shutil
+import socket
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import git
 import requests
@@ -15,6 +17,45 @@ from urllib3.util.retry import Retry
 from ..config import settings
 
 logger = logging.getLogger(__name__)
+
+# Private networks — must match the list in schemas.py. The schema
+# validator is the primary gate; this is defense-in-depth so the
+# service is safe even if called directly (e.g. from a Celery task).
+_PRIVATE_NETWORKS = [
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+]
+
+
+def _is_private_host(hostname: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(socket.gethostbyname(hostname))
+        return any(addr in net for net in _PRIVATE_NETWORKS)
+    except (socket.gaierror, ValueError):
+        return False
+
+
+def _assert_safe_git_url(git_url: str) -> None:
+    """Raise ValueError if ``git_url`` resolves to a private/internal address.
+
+    Called before any credential is injected into the URL to prevent
+    SSRF: a staff-controlled ``git_link`` must not be able to reach
+    internal infrastructure (metadata endpoints, Postgres, RabbitMQ…).
+    """
+    parsed = urlparse(git_url if "://" in git_url else f"https://{git_url.replace(':', '/', 1).replace('git@', '')}")
+    hostname = parsed.hostname or ""
+    if _is_private_host(hostname):
+        raise ValueError(
+            f"git_link hostname {hostname!r} resolves to a private address; "
+            "refusing to inject credentials"
+        )
 
 
 class GitService:
@@ -52,6 +93,7 @@ class GitService:
 
     def _get_authenticated_url(self, git_url: str) -> str:
         """Convert Git URL to HTTPS format with token authentication."""
+        _assert_safe_git_url(git_url)
         url = git_url
         if url.startswith('git@'):
             url = url.replace('git@', '').replace(':', '/', 1)

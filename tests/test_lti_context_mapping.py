@@ -180,6 +180,7 @@ def test_a_foreign_teacher_cannot_undo_someone_elses_mapping(client, db):
     assert ctx.courseId == course.courseId
 
 
+
 # ================================================================
 # KILL SWITCH
 # ================================================================
@@ -191,3 +192,54 @@ def test_the_endpoints_are_off_when_lti_is(client, db, monkeypatch):
     assert client.put(
         f"/lti/contexts/{ctx.ltiContextId}", json={"courseId": None}
     ).status_code == 503
+
+
+# ================================================================
+# H-7 REGRESSION — auth bypass when mapped course is deleted
+# ================================================================
+def test_student_cannot_detach_context_when_mapped_course_is_deleted(
+    student_client, db
+):
+    """Before the fix: if a context's mapped course was deleted,
+    ``ensure_edit_course`` was inside an ``if current is not None:`` guard
+    and was silently skipped — any authenticated user could then detach
+    the mapping.  After the fix a student must still get 403.
+    """
+    course = _course(db)
+    ctx = _context(db, course)
+
+    # Simulate the course being deleted after the mapping was made.
+    db.delete(course)
+    db.commit()
+    # The context still holds the old courseId FK; Postgres ON DELETE SET NULL
+    # may clear it depending on schema, but we test the guard path directly
+    # by checking the ctx still has the courseId set (or that 403 is returned
+    # regardless of db state at this point).
+    db.refresh(ctx)
+
+    resp = student_client.put(
+        f"/lti/contexts/{ctx.ltiContextId}", json={"courseId": None}
+    )
+
+    assert resp.status_code == 403
+
+
+def test_teacher_can_still_detach_context_when_mapped_course_is_deleted(
+    client, db
+):
+    """A teacher/admin should be allowed to clean up an orphaned mapping
+    (their role satisfies the ``ensure_view_course_detail`` fallback).
+    """
+    course = _course(db)
+    ctx = _context(db, course)
+
+    db.delete(course)
+    db.commit()
+    db.refresh(ctx)
+
+    # client fixture is authenticated as a teacher/admin
+    resp = client.put(
+        f"/lti/contexts/{ctx.ltiContextId}", json={"courseId": None}
+    )
+
+    assert resp.status_code == 200
