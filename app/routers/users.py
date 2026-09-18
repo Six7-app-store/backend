@@ -1,13 +1,14 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.crud import apps as crud_apps
 from app.crud import deployments as crud_deployments
 from app.crud import users as crud_users
 from app.database import get_db
-from app.models import User, UserRole
+from app.models import App, Deployment, User, UserRole
 from app.schemas import UserResponse, UserStatistics, UserUpdate, UserWithCourse
 from app.utils.auth import get_current_user
 from app.utils.capabilities import ensure_change_user_role, ensure_view_user
@@ -182,16 +183,37 @@ def get_user_statistics(
     # Check access permission
     ensure_view_user(current_user, user_id)
 
-    # Get statistics
-    apps = crud_apps.get_apps(db, user_id=user_id, limit=1000)
-    deployments = crud_deployments.get_deployments(db, user_id=user_id, limit=1000)
+    # Get statistics — counts via SQL to avoid a hard limit and to avoid
+    # loading full ORM objects. Deployment status is derived from the
+    # latest task (Deployment has no stored status column), so we fetch
+    # deployment IDs and pass them to bulk_get_task_summary.
+    total_apps = (
+        db.query(func.count(App.appId))
+        .filter(App.userId == user_id, App.deleted_at.is_(None))
+        .scalar()
+        or 0
+    )
+
+    dep_ids = [
+        row[0]
+        for row in db.query(Deployment.deploymentId)
+        .filter(Deployment.userId == user_id, Deployment.deleted_at.is_(None))
+        .all()
+    ]
+    total_deployments = len(dep_ids)
+
+    task_summary = crud_deployments.bulk_get_task_summary(db, dep_ids)
+    statuses = [
+        crud_deployments.derive_status(task_status, task_type)
+        for task_status, task_type, _ in task_summary.values()
+    ]
 
     return UserStatistics(
-        total_apps=len(apps),
-        total_deployments=len(deployments),
-        successful_deployments=len([d for d in deployments if d.status.value == "success"]),
-        failed_deployments=len([d for d in deployments if d.status.value == "failed"]),
-        pending_deployments=len([d for d in deployments if d.status.value == "pending"])
+        total_apps=total_apps,
+        total_deployments=total_deployments,
+        successful_deployments=sum(1 for s in statuses if s == "success"),
+        failed_deployments=sum(1 for s in statuses if s == "failed"),
+        pending_deployments=sum(1 for s in statuses if s == "pending"),
     )
 
 # ----------------------------------------------------------------
