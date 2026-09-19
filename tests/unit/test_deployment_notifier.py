@@ -350,3 +350,115 @@ def test_notify_handles_smtp_failure_gracefully():
     # All three mails were attempted even though every one of them
     # raised: 2 per-user mails + 1 owner summary.
     assert m_send.call_count == 3
+
+
+# ---------------------------------------------------------------------------
+# Connection protocol
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        # An explicit ``protocol`` always wins — including over a port
+        # that would suggest something else.
+        ({"protocol": "rdp", "ip": "1.2.3.4", "port": 8080}, "rdp"),
+        ({"protocol": "RDP ", "ip": "1.2.3.4", "port": 22}, "rdp"),
+        ({"protocol": "none", "ip": "1.2.3.4", "port": 8080}, "none"),
+        # Unknown values fall through to inference rather than being
+        # rendered as a protocol nobody can use.
+        ({"protocol": "telnet", "ip": "1.2.3.4", "port": 3389}, "rdp"),
+        # Legacy ``authtype`` from templates written before ``protocol``.
+        ({"authtype": "ssh", "ip": "1.2.3.4", "port": 8080}, "ssh"),
+        ({"authtype": "url", "ip": "1.2.3.4", "port": 8080}, "web"),
+        # An ssh_key credential can only mean SSH.
+        ({"type": "ssh_key", "ip": "1.2.3.4", "port": 8080}, "ssh"),
+        # Well-known ports.
+        ({"ip": "1.2.3.4", "port": 3389}, "rdp"),
+        ({"ip": "1.2.3.4", "port": 5900}, "vnc"),
+        ({"ip": "1.2.3.4", "port": 22}, "ssh"),
+        # Anything else with an ip:port is the web UI the deployment
+        # page already assumed it was.
+        ({"ip": "1.2.3.4", "port": 8080}, "web"),
+        # No port: SSH, the historical default.
+        ({"ip": "1.2.3.4", "username": "luca"}, "ssh"),
+    ],
+)
+def test_resolve_protocol(raw, expected):
+    assert deployment_notifier._resolve_protocol(raw) == expected
+
+
+@pytest.mark.unit
+def test_resolve_protocol_uses_team_url_only_as_last_resort():
+    """A team VM URL means "web" for an account with nothing else to go
+    on, but never overrides the account's own signals."""
+    assert deployment_notifier._resolve_protocol({}, has_team_url=True) == "web"
+    assert deployment_notifier._resolve_protocol({}, has_team_url=False) == "ssh"
+    assert (
+        deployment_notifier._resolve_protocol({"port": 3389}, has_team_url=True) == "rdp"
+    )
+
+
+@pytest.mark.unit
+def test_connect_string_per_protocol():
+    ssh = {"ip": "1.2.3.4", "port": 2222, "username": "luca"}
+    assert deployment_notifier._connect_string("ssh", ssh, None) == "ssh -p 2222 luca@1.2.3.4"
+    assert (
+        deployment_notifier._connect_string("ssh", {**ssh, "port": 22}, None)
+        == "ssh luca@1.2.3.4"
+    )
+    # RDP/VNC hand out the host:port a client dials, never a command.
+    assert deployment_notifier._connect_string("rdp", {"ip": "1.2.3.4", "port": 3389}, None) == "1.2.3.4:3389"
+    assert deployment_notifier._connect_string("rdp", {"ip": "1.2.3.4"}, None) == "1.2.3.4:3389"
+    assert deployment_notifier._connect_string("vnc", {"ip": "1.2.3.4"}, None) == "1.2.3.4:5900"
+    # Web prefers the team URL and falls back to the per-user ip:port.
+    assert (
+        deployment_notifier._connect_string("web", {"ip": "1.2.3.4", "port": 80}, "http://x/ide")
+        == "http://x/ide"
+    )
+    assert (
+        deployment_notifier._connect_string("web", {"ip": "1.2.3.4", "port": 8080}, None)
+        == "http://1.2.3.4:8080"
+    )
+
+
+@pytest.mark.unit
+def test_connect_string_is_none_when_unusable():
+    """No half-built lines: an incomplete account or an app that ships
+    no endpoint yields ``None`` so the mail leaves the row out."""
+    assert deployment_notifier._connect_string("ssh", {"ip": "1.2.3.4"}, None) is None
+    assert deployment_notifier._connect_string("ssh", {"username": "luca"}, None) is None
+    assert deployment_notifier._connect_string("rdp", {"port": 3389}, None) is None
+    assert deployment_notifier._connect_string("none", {"ip": "1.2.3.4"}, None) is None
+    assert deployment_notifier._connect_string("web", {}, None) is None
+
+
+@pytest.mark.unit
+def test_access_for_user_carries_protocol_and_connect():
+    """A Windows app ships ``type = "password"`` like a Linux one; only
+    ``protocol`` tells the platform not to print an ssh command."""
+    user = _make_user(username="luca", email="luca@dhbw.de")
+    outputs = {
+        "user_accounts": {
+            "value": {
+                "Team-1-luca": {
+                    "auth": "s3cret",
+                    "ip": "10.200.5.60",
+                    "port": 3389,
+                    "type": "password",
+                    "protocol": "rdp",
+                    "username": "luca",
+                }
+            }
+        }
+    }
+
+    access = deployment_notifier._access_for_user(outputs, "Team-1", user)
+
+    assert access is not None
+    assert access["protocol"] == "rdp"
+    assert access["connect"] == "10.200.5.60:3389"
+    # The credential slot is untouched — the two are independent.
+    assert access["auth_type"] == "password"
+    assert access["password"] == "s3cret"

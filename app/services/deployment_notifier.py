@@ -86,10 +86,22 @@ def _display_name(user: User) -> str:
 #         "ip":       "1.2.3.4",
 #         "port":     8080,
 #         "type":     "password" | "ssh_key" | "oauth" | "none",
+#         "protocol": "ssh" | "rdp" | "vnc" | "web" | "none",
 #         "username": "luca"
 #       },
 #       ...
 #     }
+#
+#   ``type`` and ``protocol`` answer two different questions and an app
+#   sets them independently:
+#     * ``type``     — WHAT the ``auth`` value is (a password, a public
+#                      key, a login URL, nothing).
+#     * ``protocol`` — HOW the user reaches the machine. A Windows VM
+#                      ships ``type = "password"`` like a Linux one but
+#                      ``protocol = "rdp"``, so the platform must not
+#                      hand out an ``ssh`` command for it.
+#   ``protocol`` is optional; :func:`_resolve_protocol` infers it for
+#   apps that predate the field.
 #
 #   Auth-type contract:
 #     * ``password`` (default if omitted) — ``auth`` is the password
@@ -152,6 +164,82 @@ def _vm_for_team(outputs: dict[str, Any] | None, team_name: str) -> dict[str, An
         "fixed_ip": raw.get("fixed_ip"),
         "instance_name": raw.get("instance_name"),
     }
+
+
+# ----------------------------------------------------------------------------
+# Connection protocol
+# ----------------------------------------------------------------------------
+
+#: Protocols an app may declare in ``user_accounts.<key>.protocol``.
+PROTOCOLS = ("ssh", "rdp", "vnc", "web", "none")
+
+#: Ports that identify a protocol on their own. Only consulted when the
+#: app declared no ``protocol`` — an explicit value always wins, so an
+#: app is free to serve RDP on a non-standard port.
+_PORT_PROTOCOLS = {22: "ssh", 3389: "rdp", 5900: "vnc"}
+
+#: Legacy slot some templates wrote before ``protocol`` existed.
+_AUTHTYPE_PROTOCOLS = {"ssh": "ssh", "url": "web", "http": "web", "web": "web"}
+
+
+def _resolve_protocol(raw: dict[str, Any], *, has_team_url: bool = False) -> str:
+    """Decide how the user connects to their machine.
+
+    An explicit ``protocol`` wins. Everything below it only exists so
+    apps deployed before the field existed keep rendering exactly as
+    they did: the legacy ``authtype`` slot, then an ``ssh_key``
+    credential (which can only mean SSH), then the well-known port,
+    then "it has an ip:port, so it is probably a web UI" — which is
+    what the deployment page already assumed. The final fallback stays
+    ``ssh`` for the same reason.
+    """
+    declared = str(raw.get("protocol") or "").strip().lower()
+    if declared in PROTOCOLS:
+        return declared
+
+    legacy = str(raw.get("authtype") or "").strip().lower()
+    if legacy in _AUTHTYPE_PROTOCOLS:
+        return _AUTHTYPE_PROTOCOLS[legacy]
+
+    if raw.get("type") == "ssh_key":
+        return "ssh"
+
+    port = raw.get("port")
+    if isinstance(port, int) and port in _PORT_PROTOCOLS:
+        return _PORT_PROTOCOLS[port]
+
+    if raw.get("ip") and port:
+        return "web"
+    if has_team_url:
+        return "web"
+    return "ssh"
+
+
+def _connect_string(protocol: str, raw: dict[str, Any], url: str | None) -> str | None:
+    """Build the one line a user can copy to reach their machine.
+
+    ``ssh`` yields a ready-to-run command (``-p`` omitted on port 22),
+    ``rdp``/``vnc`` the ``host:port`` an RDP/VNC client expects, ``web``
+    the URL. ``none`` and incomplete accounts yield ``None`` so the mail
+    and the UI can leave the line out instead of printing a half one.
+    """
+    ip = raw.get("ip")
+    port = raw.get("port")
+    username = raw.get("username")
+
+    if protocol == "ssh":
+        if not ip or not username:
+            return None
+        port_flag = f"-p {port} " if port and port != 22 else ""
+        return f"ssh {port_flag}{username}@{ip}"
+    if protocol in ("rdp", "vnc"):
+        if not ip:
+            return None
+        default_port = 3389 if protocol == "rdp" else 5900
+        return f"{ip}:{port or default_port}"
+    if protocol == "web":
+        return url or (f"http://{ip}:{port}" if ip and port else None)
+    return None
 
 
 def _normalise_account_key(value: str | None) -> str:
@@ -272,6 +360,11 @@ def _access_for_user(
     # for the password type so a missing value renders as None (templates
     # check ``auth_type`` before pulling ``password``).
     password = auth_value if auth_type == "password" else None
+    # ``protocol`` is the app's statement about HOW to connect; the
+    # mail renders ``connect`` verbatim so it never builds an ``ssh``
+    # command for an RDP machine.
+    team_url = (_vm_for_team(outputs, team_name) or {}).get("url")
+    protocol = _resolve_protocol(raw, has_team_url=bool(team_url))
     return {
         "username": raw.get("username") or suffix,
         "password": password,
@@ -282,9 +375,14 @@ def _access_for_user(
         # templates use it together with ``auth_type`` to decide WHERE to
         # show it (password field, SSH-key block, OAuth login link, ...).
         "auth_value": auth_value,
+        "protocol": protocol,
+        # Ready-to-use connect line for ``protocol`` — an ssh command, an
+        # ``ip:port`` for RDP/VNC, a URL for web apps, ``None`` when the
+        # app ships no reachable endpoint.
+        "connect": _connect_string(protocol, raw, team_url),
         # Convenience fallback so the user-mail can show a URL even when
         # the per-user output doesn't carry one — use the team VM's URL.
-        "url": (_vm_for_team(outputs, team_name) or {}).get("url"),
+        "url": team_url,
     }
 
 
