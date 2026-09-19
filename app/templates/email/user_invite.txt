@@ -13,6 +13,11 @@ ACCESS
 {% endif -%}
 {% if access.ip %}IP:        {{ access.ip }}{% if access.port %}:{{ access.port }}{% endif %}
 {% endif -%}
+{#- ``connect`` is the ready-to-use line for the app's ``protocol``: an
+    ssh command, an ip:port for an RDP/VNC client. Web apps already got
+    their URL above, so they skip this row. -#}
+{% if access.connect and access.protocol != "web" %}{{ "%-11s"|format(access.protocol|upper ~ ":") }}{{ access.connect }}
+{% endif -%}
 Username:  {{ access.username }}
 {# Auth rendering branches on ``access.auth_type``. Default
    (``password``) prints the password line; other types use a

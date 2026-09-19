@@ -53,3 +53,9 @@ Ohne `TEST_DATABASE_URL` leert die Suite die **Dev**-Datenbank. Deshalb immer
   bereits gefahren hat. Ein PreToolUse-Hook blockt das.
 - `.env` und alles auf `*.pem`
 - Kein Prod-Deploy, kein `git push --force`
+- `.claude/` — erzeugt aus `deployment/harness/`. Was hier geändert wird, ist
+  beim nächsten `make harness-sync` weg. Änderungen gehören in die Quelle.
+
+Geheimnisse, Produktions-Deploys, `terraform apply` und Pushes auf `main` sind
+zusätzlich als deny-Regel in `.claude/settings.json` gesperrt. So ein Kommando
+scheitert ohne Nachfrage — das ist Absicht und kein Werkzeugfehler.
