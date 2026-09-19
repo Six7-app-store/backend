@@ -37,7 +37,7 @@ def test_valid_git_link_accepted(url):
 # Blocked: plain HTTP
 # ----------------------------------------------------------------
 def test_http_url_rejected():
-    with pytest.raises(ValidationError, match="HTTPS"):
+    with pytest.raises(ValidationError, match="https://"):
         AppCreate(**_app(git_link="http://github.com/org/repo.git"))
 
 

@@ -693,6 +693,7 @@ def test_keycloak_sign_in_after_an_lti_launch_reuses_the_account(
         {
             "sub": "keycloak-sub-1",
             "email": "anna@dhbw.de",
+            "email_verified": True,
             "username": "anna",
             "realm_access": {"roles": ["student"]},
         },

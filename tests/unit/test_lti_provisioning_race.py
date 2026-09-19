@@ -33,11 +33,11 @@ def _identity(**overrides):
         "email": "anna@dhbw.de",
         "first_name": "Anna",
         "last_name": "Müller",
+        "display_name": "Anna Müller",
+        "is_instructor": False,
         "context_id": None,
         "context_title": None,
         "context_label": None,
-        "roles": [],
-        "deployment_id": "1",
     }
     base.update(overrides)
     return LaunchIdentity(**base)
@@ -59,10 +59,13 @@ def test_provision_user_recovers_from_concurrent_insert():
     existing_link.user = existing_user
 
     db = MagicMock()
-    # First query (UserIdentity lookup) → no existing link yet
-    # Second query (re-fetch after rollback) → the winning row
+    # Three query calls in order:
+    #   1. UserIdentity link lookup → not found
+    #   2. _email_is_taken User lookup → not found (so provisioning proceeds)
+    #   3. re-fetch UserIdentity after rollback → winner's row
     db.query.return_value.filter.return_value.first.side_effect = [
-        None,       # initial link lookup → not found
+        None,           # initial link lookup → not found
+        None,           # _email_is_taken → address not taken
         existing_link,  # re-fetch after rollback → winner's row
     ]
     db.commit.side_effect = [IntegrityError("unique", {}, None), None]
@@ -80,6 +83,7 @@ def test_provision_user_reraises_if_refetch_returns_nothing():
     db = MagicMock()
     db.query.return_value.filter.return_value.first.side_effect = [
         None,  # initial link lookup
+        None,  # _email_is_taken → address not taken
         None,  # re-fetch after rollback — nothing found
     ]
     db.commit.side_effect = IntegrityError("unique", {}, None)

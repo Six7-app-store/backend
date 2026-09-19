@@ -42,6 +42,7 @@ from app.services.deployment_status import (
     build_resource_detail,
     build_resource_views,
 )
+from app.services.hcl_variable_parser import load_variable_definitions
 from app.services.tf_state_parser import parse_tf_state
 from app.utils.auth import get_current_user
 from app.utils.capabilities import (
@@ -370,7 +371,7 @@ def get_deployment(
     # ``/apps``-endpoints already use — to swap the bytes for the
     # data-URL string in place. Apps without an uploaded image are
     # unaffected (``getattr`` returns ``None`` and the helper no-ops).
-    from app.routers.apps import _serialize_app  # local: avoid import cycle
+    from app.routers.apps import _serialize_app
     serialised_app = _serialize_app(deployment.app)
 
     return DeploymentDetail(
@@ -928,7 +929,6 @@ def create_deployment(
     # server agree on which variable is scoped/file/free-text.
     variable_definitions: list[dict] = []
     if deployment.userInputVar or deployment.files:
-        from app.routers.apps import load_variable_definitions
         release_tag = deployment.releaseTag or "main"
         try:
             variable_definitions = load_variable_definitions(target_app, release_tag)

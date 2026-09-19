@@ -6,7 +6,7 @@ functions — no Git clone, no FastAPI app, no DB.
 """
 import pytest
 
-from app.routers.apps import (
+from app.services.hcl_variable_parser import (
     _FILE_SCOPES,
     _OS_TYPES,
     _VAR_SCOPES,
