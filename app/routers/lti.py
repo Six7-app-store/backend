@@ -7,6 +7,18 @@ Three endpoints, in the order a launch touches them:
 ``POST /lti/launch``  the signed id_token arrives and is verified
 ``POST /lti/link``    claims a Moodle identity for the signed-in account
 
+Two more sit behind a launch rather than in it, both about the Moodle
+course a launch came from:
+
+``PUT  /lti/contexts/{id}``         attach it to an existing Studiengruppe
+``POST /lti/contexts/{id}/import``  make the Studiengruppe from its roster
+
+``POST /lti/launch`` also answers a *second* message type. A deep-linking
+request means Moodle is not opening the tool but asking what the activity
+being created should point at; the answer is signed by
+
+``POST /lti/deep-link/select``      bind the activity to one app
+
 The sequence looks roundabout — Moodle calls us, we redirect back to
 Moodle, Moodle posts to us — and that is the point: the tool has to
 start the exchange so it can issue the ``nonce`` that must come back
@@ -30,21 +42,44 @@ from starlette.responses import Response
 
 from app.config import settings
 from app.database import get_db
-from app.models import Course, IdentityProvider, LtiContext, User, UserIdentity
+from app.models import (
+    App,
+    Course,
+    IdentityProvider,
+    LtiContext,
+    User,
+    UserIdentity,
+    UserRole,
+)
 from app.services.lti_service import (
+    CLAIM_DEPLOYMENT_ID,
+    CLAIM_DL_SETTINGS,
+    CLAIM_TARGET_LINK_URI,
+    CUSTOM_APP_ID,
+    TARGET_DEEP_LINK,
+    TARGET_ENVIRONMENTS,
     LtiConfigurationError,
     LtiProvisioningError,
+    LtiRosterError,
     context_role_label,
+    extract_custom_app_id,
     extract_identity,
+    extract_memberships_url,
     get_launch_storage,
     get_tool_conf,
     get_tool_jwks,
+    import_context_roster,
     provision_user,
     record_context,
     resolve_launch_target,
+    sign_deep_link_response,
 )
 from app.utils.auth import get_current_keycloak_user, get_current_user
-from app.utils.capabilities import ensure_edit_course, ensure_view_course_detail
+from app.utils.capabilities import (
+    ensure_edit_course,
+    ensure_view_app,
+    ensure_view_course_detail,
+)
 from app.utils.lti_fastapi import (
     FastApiMessageLaunch,
     FastApiOIDCLogin,
@@ -55,6 +90,7 @@ from app.utils.lti_session import (
     create_session_token,
     decode_link_challenge,
 )
+from app.utils.permissions import require_staff
 from app.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
@@ -128,6 +164,50 @@ def _link_required(identity) -> RedirectResponse:
         f"{urlencode({'challenge': challenge})}"
     )
     return RedirectResponse(location, status_code=302)
+
+
+def _deep_link_key(handle: str) -> str:
+    """Where a pending deep-link selection is parked."""
+    return f"deep-link-{handle}"
+
+
+def _deep_link_target(user: User, claims: t.Mapping[str, t.Any]) -> str:
+    """Park what the selection will need and point at the picker.
+
+    Moodle's return URL and the settings that go with it are handed to
+    us once, inside a message that is verified here and gone afterwards.
+    The lecturer then spends time choosing, on a separate request that
+    carries none of it — so it is stored server-side under a random
+    handle rather than sent through the browser. What travels in the URL
+    is the handle alone, and it is useless to anyone but its owner: the
+    selection endpoint checks that the caller is the user it was issued
+    to, and spends it on use.
+
+    Staff only. Moodle offers content selection to course editors, but
+    that is Moodle's check, not ours — a student who reaches this lands
+    on their environments instead.
+    """
+    if user.role not in (UserRole.TEACHER, UserRole.ADMIN):
+        logger.warning(
+            "Deep-link request from non-staff user %s — sending them to their "
+            "environments instead",
+            user.userId,
+        )
+        return TARGET_ENVIRONMENTS
+
+    handle = uuid.uuid4().hex
+    get_launch_storage().set_value(
+        _deep_link_key(handle),
+        {
+            "iss": claims.get("iss"),
+            "deployment_id": claims.get(CLAIM_DEPLOYMENT_ID),
+            "settings": claims.get(CLAIM_DL_SETTINGS) or {},
+            "target_link_uri": claims.get(CLAIM_TARGET_LINK_URI),
+            "user_id": str(user.userId),
+        },
+        exp=settings.LTI_DEEP_LINK_TTL_MINUTES * 60,
+    )
+    return f"{TARGET_DEEP_LINK}?dl={handle}"
 
 
 def _require_lti_enabled() -> None:
@@ -298,7 +378,9 @@ async def lti_launch(
             detail={"code": e.code, "message": e.message},
         ) from e
 
-    context = record_context(db, identity)
+    context = record_context(
+        db, identity, memberships_url=extract_memberships_url(claims)
+    )
 
     try:
         token = create_session_token(
@@ -331,7 +413,16 @@ async def lti_launch(
     # Where this launch should land. A student clicking a Moodle
     # activity wants their environment, not a dashboard they then have
     # to navigate out of.
-    target = resolve_launch_target(db, user, context)
+    #
+    # A deep-linking request is a different message type on the same
+    # endpoint: Moodle is not opening the tool, it is asking what the
+    # activity being created should point at. It gets the picker.
+    if message_launch.is_deep_link_launch():
+        target = _deep_link_target(user, claims)
+    else:
+        target = resolve_launch_target(
+            db, user, context, app_id=extract_custom_app_id(claims)
+        )
 
     separator = "&" if "?" in settings.LTI_LAUNCH_REDIRECT_URL else "?"
     location = (
@@ -508,3 +599,224 @@ def map_lti_context(
         user.userId,
     )
     return context
+
+
+# ----------------------------------------------------------------
+# ROSTER IMPORT
+# ----------------------------------------------------------------
+class LtiRosterImportRequest(BaseModel):
+    """Optionally override the name of the Studiengruppe being created."""
+
+    name: str | None = Field(default=None, max_length=200)
+
+
+class LtiRosterSkipResponse(BaseModel):
+    """One member the import left alone, and why."""
+
+    name: str | None = None
+    email: str | None = None
+    reason: str
+
+
+class LtiRosterImportResponse(BaseModel):
+    context: LtiContextResponse
+    courseId: UUID
+    courseName: str
+    created: int
+    matched: int
+    teachers: int
+    students: int
+    skipped: list[LtiRosterSkipResponse]
+
+
+@router.post(
+    "/contexts/{lti_context_id}/import",
+    response_model=LtiRosterImportResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def import_lti_context(
+    lti_context_id: UUID,
+    payload: LtiRosterImportRequest,
+    user: User = Depends(require_staff),
+    db: Session = Depends(get_db),
+) -> LtiRosterImportResponse:
+    """Create the Studiengruppe behind a Moodle course and fill it from it.
+
+    The counterpart to :func:`map_lti_context`: that one attaches a
+    Moodle course to a Studiengruppe that already exists, this one makes
+    the Studiengruppe when there is none to point at. Both are the same
+    decision — that these two things are one — and both need a person to
+    make it. Nothing here runs as a side effect of a launch.
+
+    Reachable on an LTI session because the lecturer arrives straight
+    from one. Staff only; the member list is read from Moodle with the
+    tool's own key, so a student must not be able to trigger it.
+
+    A context that is already mapped is refused rather than given a
+    second Studiengruppe — the way to change an existing mapping is the
+    ``PUT``, which checks rights on the course being remapped.
+    """
+    _require_lti_enabled()
+    context = _load_context(db, lti_context_id)
+
+    if context.courseId is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "lti_context_already_mapped",
+                "message": "This Moodle course is already assigned to a "
+                "Studiengruppe.",
+            },
+        )
+
+    try:
+        result = import_context_roster(db, context, user, name=payload.name)
+    except LtiConfigurationError as e:
+        logger.error("LTI configuration incomplete: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "lti_misconfigured", "message": str(e)},
+        ) from e
+    except LtiRosterError as e:
+        # The platform said no or could not be reached. Nothing was
+        # written: the roster is read before the first row is created.
+        logger.warning("Roster import failed for context %s: %s", lti_context_id, e.message)
+        raise HTTPException(
+            status_code=e.status_code,
+            detail={"code": e.code, "message": e.message},
+        ) from e
+
+    return LtiRosterImportResponse(
+        context=LtiContextResponse.model_validate(context),
+        courseId=result.course.courseId,
+        courseName=result.course.name,
+        created=result.created,
+        matched=result.matched,
+        teachers=result.teachers,
+        students=result.students,
+        skipped=[
+            LtiRosterSkipResponse(name=s.name, email=s.email, reason=s.reason)
+            for s in result.skipped
+        ],
+    )
+
+
+# ----------------------------------------------------------------
+# DEEP LINKING
+# ----------------------------------------------------------------
+class LtiDeepLinkSelectRequest(BaseModel):
+    """Which app the activity being created should point at."""
+
+    handle: str = Field(min_length=1, max_length=64)
+    appId: UUID
+
+
+class LtiDeepLinkSelectResponse(BaseModel):
+    """The signed answer, and where the browser must post it.
+
+    Deliberately not posted from here: ``returnUrl`` is a Moodle URL
+    that authenticates the *lecturer's Moodle session*. Only their
+    browser has it.
+    """
+
+    jwt: str
+    returnUrl: str
+    appName: str
+
+
+@router.post("/deep-link/select", response_model=LtiDeepLinkSelectResponse)
+def select_deep_link(
+    payload: LtiDeepLinkSelectRequest,
+    user: User = Depends(require_staff),
+    db: Session = Depends(get_db),
+) -> LtiDeepLinkSelectResponse:
+    """Turn the lecturer's pick into the content item Moodle asked for.
+
+    Binds the activity to an **app**, not to one environment. Which
+    environment a student then opens is resolved per person at launch
+    time, from the deployments they are a member of — so the same
+    activity works for a course that shares one environment and for a
+    course where everybody has their own, and it survives an environment
+    being torn down and rebuilt.
+
+    The handle is spent here. A second attempt with the same one is
+    refused rather than signing a second content item: Moodle treats the
+    response as the answer to one question, and the lecturer starting
+    over gets a fresh question anyway.
+    """
+    _require_lti_enabled()
+
+    storage = get_launch_storage()
+    key = _deep_link_key(payload.handle)
+    parked = storage.get_value(key)
+
+    if not parked:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "lti_deep_link_expired",
+                "message": "This selection is no longer open. Add the activity "
+                "in Moodle again.",
+            },
+        )
+
+    if parked.get("user_id") != str(user.userId):
+        # The handle is somebody else's. Refusing on ownership keeps a
+        # leaked handle from letting a second lecturer answer a question
+        # that was never put to them.
+        logger.warning(
+            "Deep-link handle issued to %s was used by %s",
+            parked.get("user_id"),
+            user.userId,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "lti_deep_link_foreign",
+                "message": "This selection belongs to a different account.",
+            },
+        )
+
+    app = db.get(App, payload.appId)
+    if app is None or app.deleted_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "app_not_found", "message": "Unknown app"},
+        )
+    # The same visibility rule the app list uses. Without it a handle
+    # could be pointed at a private app by id alone.
+    ensure_view_app(user, app, db=db)
+
+    if not storage.check_value(key):
+        # Spent between the read above and here. Only one of two
+        # concurrent attempts gets through; the other must not sign.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "lti_deep_link_expired",
+                "message": "This selection was already completed.",
+            },
+        )
+
+    try:
+        jwt_value, return_url = sign_deep_link_response(
+            issuer=parked.get("iss") or "",
+            deployment_id=parked.get("deployment_id") or "",
+            dl_settings=parked.get("settings") or {},
+            title=app.name,
+            url=parked.get("target_link_uri"),
+            custom={CUSTOM_APP_ID: str(app.appId)},
+        )
+    except LtiConfigurationError as e:
+        logger.error("Cannot sign deep-link response: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "lti_misconfigured", "message": str(e)},
+        ) from e
+
+    logger.info(
+        "Deep link selected by user %s: app %s (%s)", user.userId, app.appId, app.name
+    )
+    return LtiDeepLinkSelectResponse(
+        jwt=jwt_value, returnUrl=return_url, appName=app.name
+    )

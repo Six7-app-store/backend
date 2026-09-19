@@ -487,6 +487,13 @@ class LtiContext(Base):
     context_id = Column(String, nullable=False)
     title = Column(String, nullable=True)
     label = Column(String, nullable=True)
+    # Where the platform serves this course's member list (NRPS). The
+    # URL arrives in the launch and is stored because the import runs
+    # later, on a request of its own, when no launch is in hand. Null
+    # when the platform does not offer the service — the tool then has
+    # no way to read the roster and the import says so instead of
+    # guessing.
+    memberships_url = Column(String, nullable=True)
     courseId = Column(
         UUID(as_uuid=True),
         ForeignKey("courses.courseId", ondelete="SET NULL"),
