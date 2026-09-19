@@ -100,6 +100,14 @@ class Settings(BaseSettings):
     # the window only has to outlast one login round trip.
     LTI_LINK_CHALLENGE_TTL_MINUTES: int = 10
 
+    # How long a pending deep-link selection stays valid. Moodle hands
+    # the tool its return URL when the lecturer starts adding the
+    # activity; the choice is made on our side and posted back. The
+    # window has to outlast a human picking from a list, not a redirect,
+    # which is why it is minutes rather than seconds — but it is still
+    # one-shot, so a longer window is not a second chance.
+    LTI_DEEP_LINK_TTL_MINUTES: int = 30
+
     # Frontend route the launch redirects to, with the session token.
     LTI_LAUNCH_REDIRECT_URL: str = "http://localhost:5173/lti/callback"
 
