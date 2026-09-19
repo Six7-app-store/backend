@@ -27,6 +27,17 @@
     <td><code>{{ access.ip }}</code>{% if access.port %}:<code>{{ access.port }}</code>{% endif %}</td>
   </tr>
   {% endif %}
+  {#
+    ``connect`` is the ready-to-use line for the app's ``protocol``: an
+    ssh command, or the ip:port an RDP/VNC client expects. Web apps
+    already show their URL above, so they skip this row.
+  #}
+  {% if access.connect and access.protocol != "web" %}
+  <tr>
+    <td>{{ access.protocol|upper }}</td>
+    <td><code>{{ access.connect }}</code></td>
+  </tr>
+  {% endif %}
   <tr>
     <td>Username</td>
     <td><code>{{ access.username }}</code></td>
