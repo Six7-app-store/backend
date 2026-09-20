@@ -83,10 +83,23 @@ def delete_user(db: Session, user_id: UUID) -> bool:
 
 
 def search_users(db: Session, query: str, limit: int = 10) -> list[User]:
-    """Search users by username or email"""
+    """Search this application's own users by name, username or e-mail.
+
+    The counterpart to searching Keycloak, and the only way to find the
+    accounts Keycloak does not know about: somebody provisioned by a
+    Moodle LTI launch never passes Keycloak, so a search that asks only
+    there cannot find them at all.
+
+    Matches the same fields the Keycloak Admin API searches, so the two
+    halves of :func:`app.routers.users.search_users_keycloak` behave
+    alike rather than one of them quietly ignoring a first name.
+    """
+    like = f"%{query}%"
     return db.query(User).filter(
         or_(
-            User.username.ilike(f"%{query}%"),
-            User.email.ilike(f"%{query}%")
+            User.username.ilike(like),
+            User.email.ilike(like),
+            User.firstName.ilike(like),
+            User.lastName.ilike(like),
         )
     ).limit(limit).all()

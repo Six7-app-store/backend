@@ -1,3 +1,4 @@
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -18,6 +19,8 @@ from app.utils.keycloak_auth import (
 from app.utils.permissions import (
     require_staff,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -89,17 +92,23 @@ def search_users_keycloak(
     current_user: User = Depends(require_staff)
 ):
     """
-    Search users directly from Keycloak by username, email, or name
+    Search users by username, email, or name
     - **Requires**: TEACHER or ADMIN role
-    - Returns users from Keycloak (not local DB)
 
-    Response:
-    - id: Keycloak user ID
-    - username: Username
-    - email: Email address
-    - firstName: First name
-    - lastName: Last name
-    - enabled: Account enabled status
+    Asks Keycloak **and** this application's own users, then merges the
+    two. The second half is not a nicety: an account provisioned by a
+    Moodle LTI launch has no Keycloak record, so a Keycloak-only search
+    cannot find those people at all — they would simply be missing from
+    every picker that uses this endpoint.
+
+    Keycloak hits come first because that call also syncs each hit into
+    the local database, which keeps names and e-mail current. A person
+    found by both appears once: the sync gives them the same ``userId``
+    the local lookup returns, and that is what the result is keyed on.
+
+    Response per entry: ``userId``, ``email``, ``username``, ``role``,
+    ``courseId``, ``created_at``, ``keycloak_id`` (``null`` for accounts
+    that exist only here), ``firstName``, ``lastName``.
     """
     if not query or len(query) < 2:
         raise HTTPException(
@@ -111,12 +120,8 @@ def search_users_keycloak(
     # apply and the route never writes against the dev DB.
     from app.utils.keycloak_auth import sync_user_from_keycloak
 
-    keycloak_users = search_keycloak_users(query, limit)
-    results = []
-    for kc_user in keycloak_users:
-        # Create/update the user in the local DB
-        db_user = sync_user_from_keycloak(db, kc_user)
-        results.append({
+    def _entry(db_user: User, first: str | None, last: str | None) -> dict:
+        return {
             "userId": db_user.userId,
             "email": db_user.email,
             "username": db_user.username,
@@ -124,9 +129,36 @@ def search_users_keycloak(
             "courseId": db_user.courseId,
             "created_at": db_user.created_at,
             "keycloak_id": db_user.keycloak_id,
-            "firstName": kc_user.get("firstName"),
-            "lastName": kc_user.get("lastName"),
-        })
+            "firstName": first,
+            "lastName": last,
+        }
+
+    results = []
+    seen: set = set()
+
+    # A Keycloak outage must not take the whole search with it — the
+    # local half still answers, and for LTI accounts it is the only half
+    # that ever would.
+    try:
+        keycloak_users = search_keycloak_users(query, limit)
+    except Exception:
+        logger.warning("Keycloak search failed for %r, answering from the local users only", query)
+        keycloak_users = []
+
+    for kc_user in keycloak_users:
+        # Create/update the user in the local DB
+        db_user = sync_user_from_keycloak(db, kc_user)
+        if db_user.userId in seen:
+            continue
+        seen.add(db_user.userId)
+        results.append(_entry(db_user, kc_user.get("firstName"), kc_user.get("lastName")))
+
+    for db_user in crud_users.search_users(db, query, limit):
+        if db_user.userId in seen or len(results) >= limit:
+            continue
+        seen.add(db_user.userId)
+        results.append(_entry(db_user, db_user.firstName, db_user.lastName))
+
     return results
 
 # ----------------------------------------------------------------
