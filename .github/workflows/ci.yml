@@ -220,9 +220,9 @@ jobs:
   # renders an HTML report, emits a Shields.io endpoint badge.json,
   # and (only on main) deploys everything to GitHub Pages.
   #
-  # The Pages source for this repo must be set to "GitHub Actions"
-  # under Settings → Pages once. Until then, the deploy step fails
-  # but the artifact is still uploaded.
+  # The Pages source for this repo is set to "GitHub Actions". Should
+  # that ever be switched off again, the publish steps fail but no
+  # longer redden the job — see the note beside them.
   coverage:
     name: "📊 Coverage"
     runs-on: ubuntu-latest
@@ -283,19 +283,27 @@ jobs:
           path: coverage-html
           retention-days: 14
 
+      # Publishing the report must not decide whether the deploy runs.
+      # `CD - Staging-Deploy anstossen` waits for `conclusion == 'success'`
+      # on the whole workflow, so a red step here holds back a release that
+      # is otherwise built, scanned and pushed. These three steps report,
+      # they do not gate.
       - name: Configure Pages
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         uses: actions/configure-pages@v5
+        continue-on-error: true
 
       - name: Upload Pages artifact
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         uses: actions/upload-pages-artifact@v3
+        continue-on-error: true
         with:
           path: coverage-html
 
       - name: Deploy to GitHub Pages
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         uses: actions/deploy-pages@v4
+        continue-on-error: true
 
   # ================================================================
   # 🔒 SECURITY (deps + filesystem) — blocks on HIGH/CRITICAL
