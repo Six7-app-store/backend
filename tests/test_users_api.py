@@ -169,6 +169,91 @@ def test_search_users_authenticated_ok(client):
     assert body[0]["firstName"] == "Alice"
 
 
+@pytest.mark.integration
+def test_search_findet_auch_konten_ohne_keycloak(client, db):
+    """Ein per Moodle-Launch entstandenes Konto hat kein ``keycloak_id``.
+
+    Eine Suche, die nur Keycloak fragt, findet diese Leute nie — sie
+    fehlen dann in jeder Auswahl, die diesen Endpunkt benutzt. Genau der
+    Fall, für den die lokale Hälfte da ist.
+    """
+    lti_user = _make_user(db, username="lea.moodle", email="lea.moodle@dhbw.de")
+    # ``_make_user`` setzt sonst eine erzeugte ID ein; hier ist die
+    # *fehlende* ID der Kern des Falls.
+    lti_user.keycloak_id = None
+    db.commit()
+
+    with patch("app.routers.users.search_keycloak_users", return_value=[]):
+        response = client.get("/users/search", params={"query": "lea.moodle"})
+
+    assert response.status_code == 200
+    treffer = response.json()
+    assert [t["userId"] for t in treffer] == [str(lti_user.userId)]
+    assert treffer[0]["keycloak_id"] is None
+
+
+@pytest.mark.integration
+def test_search_zaehlt_jemanden_nur_einmal(client, db):
+    """Wer über beide Hälften gefunden wird, steht trotzdem einmal da.
+
+    ``sync_user_from_keycloak`` gibt dasselbe lokale Konto zurück, das
+    auch die lokale Suche liefert — die ``userId`` ist der Schlüssel,
+    auf dem entdoppelt wird.
+    """
+    beide = _make_user(
+        db,
+        username="tom.doppelt",
+        email="tom.doppelt@dhbw.de",
+        keycloak_id="kc-tom",
+    )
+    kc_hit = {"id": "kc-tom", "username": "tom.doppelt", "email": "tom.doppelt@dhbw.de"}
+
+    with patch(
+        "app.routers.users.search_keycloak_users", return_value=[kc_hit]
+    ), patch(
+        "app.utils.keycloak_auth.sync_user_from_keycloak", side_effect=lambda _db, _kc: beide
+    ):
+        response = client.get("/users/search", params={"query": "tom.doppelt"})
+
+    assert response.status_code == 200
+    assert [t["userId"] for t in response.json()] == [str(beide.userId)]
+
+
+@pytest.mark.integration
+def test_search_antwortet_auch_wenn_keycloak_ausfaellt(client, db):
+    """Ein Keycloak-Ausfall darf die Suche nicht komplett lahmlegen.
+
+    Für LTI-Konten ist die lokale Hälfte ohnehin die einzige, die je
+    etwas gefunden hätte.
+    """
+    lokal = _make_user(db, username="nur.lokal", email="nur.lokal@dhbw.de")
+    lokal.keycloak_id = None
+    db.commit()
+
+    with patch(
+        "app.routers.users.search_keycloak_users",
+        side_effect=RuntimeError("Keycloak nicht erreichbar"),
+    ):
+        response = client.get("/users/search", params={"query": "nur.lokal"})
+
+    assert response.status_code == 200
+    assert [t["userId"] for t in response.json()] == [str(lokal.userId)]
+
+
+@pytest.mark.integration
+def test_search_findet_auch_ueber_den_vornamen(client, db):
+    """Die lokale Hälfte deckt dieselben Felder ab wie die Keycloak-Suche."""
+    user = _make_user(db, username="x.y", email="x.y@dhbw.de")
+    user.keycloak_id = None
+    user.firstName = "Ungewoehnlicher"
+    db.commit()
+
+    with patch("app.routers.users.search_keycloak_users", return_value=[]):
+        response = client.get("/users/search", params={"query": "Ungewoehnlich"})
+
+    assert [t["userId"] for t in response.json()] == [str(user.userId)]
+
+
 # ----------------------------------------------------------------
 # GET /users/{id}
 # ----------------------------------------------------------------
