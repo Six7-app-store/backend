@@ -89,6 +89,18 @@ class Course(Base):
         passive_deletes=True,
     )
 
+    @property
+    def teacherIds(self) -> list[uuid.UUID]:
+        """User-ids of this course's designated teachers.
+
+        Exposed on ``CourseResponse`` so a client can tell apart the
+        courses it may edit or delete (``ensure_edit_course``: admin or
+        course-teacher of *this* course) from the ones it may only read.
+        Without it the UI could only guess from the role and would offer
+        a delete button that answers 403.
+        """
+        return [ct.userId for ct in self.course_teachers]
+
 
 # ----------------------------------------------------------------
 # USER MODEL

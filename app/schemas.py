@@ -67,6 +67,10 @@ class CourseUpdate(BaseModel):
 
 class CourseResponse(CourseBase):
     courseId: UUID
+    # Who may edit/delete this course, next to admins. Read from
+    # ``Course.teacherIds`` (the ``course_teachers`` join table); the
+    # capability itself stays in ``ensure_edit_course``.
+    teacherIds: list[UUID] = []
 
     model_config = ConfigDict(from_attributes=True)
 

@@ -123,6 +123,63 @@ def test_list_courses_teacher_sees_only_assigned(db, mock_user):
 
 
 @pytest.mark.integration
+def test_list_courses_exposes_teacher_ids(db, mock_user):
+    """Every listed course carries its ``course_teachers`` roster.
+
+    The client uses this to tell apart the courses it may edit or delete
+    (``ensure_edit_course``) from the ones it may only read — without it
+    a teacher is shown a delete button on every course and gets a 403 on
+    the four they do not teach.
+    """
+    mine = _make_course(db, name="Mine")
+    theirs = _make_course(db, name="Theirs")
+    other_teacher = _make_user(db, suffix="other")
+    _assign_teacher(db, mine, mock_user)
+    _assign_teacher(db, theirs, other_teacher)
+
+    _override_session(mock_user)
+    try:
+        with TestClient(fastapi_app) as c:
+            response = c.get("/courses/")
+        assert response.status_code == 200
+        rows = {row["courseId"]: row for row in response.json()}
+        assert rows[str(mine.courseId)]["teacherIds"] == [str(mock_user.userId)]
+        assert rows[str(theirs.courseId)]["teacherIds"] == [str(other_teacher.userId)]
+    finally:
+        fastapi_app.dependency_overrides.clear()
+
+
+@pytest.mark.integration
+def test_course_detail_exposes_teacher_ids(db, mock_user):
+    """The detail response carries the same roster as the list."""
+    course = _make_course(db, name="Detail")
+    _assign_teacher(db, course, mock_user)
+
+    _override_session(mock_user)
+    try:
+        with TestClient(fastapi_app) as c:
+            response = c.get(f"/courses/{course.courseId}")
+        assert response.status_code == 200
+        assert response.json()["teacherIds"] == [str(mock_user.userId)]
+    finally:
+        fastapi_app.dependency_overrides.clear()
+
+
+@pytest.mark.integration
+def test_create_course_returns_creating_teacher_as_course_teacher(db, mock_user):
+    """A teacher creating a course is auto-registered, so the response
+    already says they may edit it — no second round trip needed."""
+    _override_session(mock_user)
+    try:
+        with TestClient(fastapi_app) as c:
+            response = c.post("/courses/", json={"name": "Fresh"})
+        assert response.status_code == 201
+        assert response.json()["teacherIds"] == [str(mock_user.userId)]
+    finally:
+        fastapi_app.dependency_overrides.clear()
+
+
+@pytest.mark.integration
 def test_list_courses_student_sees_only_enrolled(db, mock_student):
     """Student gets a 200 with at least their enrolled course shown."""
     enrolled = _make_course(db, name="Enrolled")

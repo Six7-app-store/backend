@@ -1,7 +1,7 @@
 from collections.abc import Iterable
 from uuid import UUID
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.models import Course, User
 from app.schemas import CourseCreate, CourseUpdate
@@ -9,12 +9,28 @@ from app.schemas import CourseCreate, CourseUpdate
 
 def get_course(db: Session, course_id: UUID) -> Course | None:
     """Get course by ID"""
-    return db.query(Course).filter(Course.courseId == course_id).first()
+    return (
+        db.query(Course)
+        .options(selectinload(Course.course_teachers))
+        .filter(Course.courseId == course_id)
+        .first()
+    )
 
 
 def get_courses(db: Session, skip: int = 0, limit: int = 100) -> list[Course]:
-    """Get all courses"""
-    return db.query(Course).offset(skip).limit(limit).all()
+    """Get all courses.
+
+    ``course_teachers`` is eager-loaded because ``CourseResponse``
+    serialises ``teacherIds`` for every row — lazy-loading would fire one
+    query per course on a list of up to ``limit`` entries.
+    """
+    return (
+        db.query(Course)
+        .options(selectinload(Course.course_teachers))
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
 
 
 def create_course(db: Session, course: CourseCreate) -> Course:
