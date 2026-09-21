@@ -265,25 +265,50 @@ def get_team_members(db: Session, team_id: UUID) -> list[User]:
 
 
 def get_deployment_teams_with_members(db: Session, deployment_id: UUID) -> list[dict[str, Any]]:
-    """Get all teams for a deployment with their members"""
-    teams = db.query(Team).filter(Team.deploymentId == deployment_id).all()
+    """Get all teams for a deployment with their members — single query."""
+    rows = (
+        db.query(Team, User)
+        .join(UserToTeam, UserToTeam.teamId == Team.teamId)
+        .join(User, User.userId == UserToTeam.userId)
+        .filter(Team.deploymentId == deployment_id)
+        .all()
+    )
 
-    result = []
-    for team in teams:
-        members = get_team_members(db, team.teamId)
-        result.append({
-            "teamId": team.teamId,
-            "name": team.name,
-            "members": [
-                {
-                    "userId": member.userId,
-                    "email": member.email,
-                    "username": member.username
-                }
-                for member in members
-            ]
-        })
+    teams_map: dict = {}
+    for team, user in rows:
+        if team.teamId not in teams_map:
+            teams_map[team.teamId] = {
+                "teamId": team.teamId,
+                "name": team.name,
+                "members": [],
+            }
+        teams_map[team.teamId]["members"].append(
+            {"userId": user.userId, "email": user.email, "username": user.username}
+        )
 
+    # Teams with no members at all won't appear in the join — add them.
+    all_teams = db.query(Team).filter(Team.deploymentId == deployment_id).all()
+    for team in all_teams:
+        if team.teamId not in teams_map:
+            teams_map[team.teamId] = {"teamId": team.teamId, "name": team.name, "members": []}
+
+    return list(teams_map.values())
+
+
+def get_team_emails_bulk(db: Session, team_ids: list) -> dict[str, list[str]]:
+    """Return {team_name: [email, ...]} for all given team IDs in one query."""
+    if not team_ids:
+        return {}
+    rows = (
+        db.query(Team.name, User.email)
+        .join(UserToTeam, UserToTeam.teamId == Team.teamId)
+        .join(User, User.userId == UserToTeam.userId)
+        .filter(Team.teamId.in_(team_ids))
+        .all()
+    )
+    result: dict[str, list[str]] = {}
+    for team_name, email in rows:
+        result.setdefault(team_name, []).append(email)
     return result
 
 

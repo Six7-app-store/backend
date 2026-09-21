@@ -193,7 +193,16 @@ def can_view_deployment_owner(user: User, dep: Deployment, db: Session) -> bool:
     # roles are rejected by the role gate in ``is_course_teacher_id``.
     if user.role != UserRole.TEACHER:
         return False
-    owner_course_id = getattr(getattr(dep, "user", None), "courseId", None)
+    # Query courseId directly to avoid relying on a lazily-loaded
+    # relation — the deployment may have been loaded without the user
+    # relation preloaded, which would cause a DetachedInstanceError
+    # or a silent None outside the session context.
+    from sqlalchemy import select
+
+    row = db.execute(
+        select(User.courseId).where(User.userId == dep.userId)
+    ).first()
+    owner_course_id = row[0] if row else None
     if owner_course_id is None:
         return False
     return is_course_teacher_id(user, owner_course_id, db)

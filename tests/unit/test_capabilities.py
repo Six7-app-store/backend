@@ -300,15 +300,16 @@ class TestCanViewDeploymentOwner:
     def test_matrix(self, role, is_owner, expected, monkeypatch):
         owner_id = uuid.uuid4()
         actor = _user(role, user_id=owner_id if is_owner else None)
-        # Build a deployment whose ``.user`` carries a courseId that
-        # is_course_teacher_id will NOT find a row for (so the teacher
-        # branch falls through to False).
+        course_id = uuid.uuid4()
         dep = SimpleNamespace(
             deploymentId=uuid.uuid4(),
             userId=owner_id,
-            user=SimpleNamespace(courseId=uuid.uuid4()),
+            user=SimpleNamespace(courseId=course_id),
         )
         db = MagicMock()
+        # execute().first() returns the owner's courseId row.
+        db.execute.return_value.first.return_value = (course_id,)
+        # is_course_teacher_id query returns None → teacher branch falls through.
         db.query.return_value.filter.return_value.first.return_value = None
         assert caps.can_view_deployment_owner(actor, dep, db) is expected
 
@@ -322,7 +323,9 @@ class TestCanViewDeploymentOwner:
             user=SimpleNamespace(courseId=course_id),
         )
         db = MagicMock()
-        # First filter().first() call returns a truthy row → match.
+        # execute().first() returns the owner's courseId.
+        db.execute.return_value.first.return_value = (course_id,)
+        # is_course_teacher_id query returns a truthy row → match.
         db.query.return_value.filter.return_value.first.return_value = (
             SimpleNamespace(courseId=course_id, userId=teacher.userId)
         )
@@ -337,6 +340,8 @@ class TestCanViewDeploymentOwner:
             user=SimpleNamespace(courseId=None),
         )
         db = MagicMock()
+        # courseId query returns a row with None (owner has no course).
+        db.execute.return_value.first.return_value = (None,)
         assert caps.can_view_deployment_owner(teacher, dep, db) is False
 
 

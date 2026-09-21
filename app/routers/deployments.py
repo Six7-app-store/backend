@@ -1315,13 +1315,11 @@ def _dispatch_lifecycle_task(
 
     teams_dict: dict = {}
     if deployment.teams:
-        # Persisted Team rows expose membership via the ``user_to_teams``
-        # association, not a flat ``userIds`` field — that lives on the
-        # request-side Pydantic schema in the create endpoint, not on
-        # the ORM. ``get_team_members`` does the join for us.
-        for team in deployment.teams:
-            members = crud_deployments.get_team_members(db, team.teamId)
-            teams_dict[team.name] = [{"email": m.email} for m in members]
+        team_ids = [t.teamId for t in deployment.teams]
+        teams_dict = {
+            name: [{"email": e} for e in emails]
+            for name, emails in crud_deployments.get_team_emails_bulk(db, team_ids).items()
+        }
 
     openstack_envelope = _fetch_dispatch_envelope(
         db, current_user.userId, rollback_on_missing=False
