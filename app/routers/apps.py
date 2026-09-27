@@ -110,6 +110,9 @@ class AppVariableResponse(BaseModel):
     osScope: str | None = None
     varScope: str | None = None
     fileExtensions: list[str] | None = None
+    # Closed value set read from ``validation { condition = contains([...],
+    # var.x) }``; the wizard renders a dropdown instead of free text.
+    allowedValues: list[Any] | None = None
     markerError: _MarkerErrorPayload | None = None
     # ``template_key`` is null for ``source = terraform`` variables and
     # carries the per-template key (``default`` for the legacy layout,
@@ -971,6 +974,41 @@ def _coerce_hcl_default(raw_default: str, var_type: str) -> tuple[Any, bool]:
     return (stripped, False)
 
 
+def _allowed_values(var_name: str, var_block: str) -> list[Any] | None:
+    """Closed value set from a ``validation`` block, if the variable has one.
+
+    Recognises the idiom Terraform authors use for enums::
+
+        validation {
+          condition     = contains(["ipv4", "ipv6", "dual"], var.ip_mode)
+          error_message = "..."
+        }
+
+    optionally with the list wrapped in ``toset(...)``/``tolist(...)``.
+    Only string/number/bool literals count: anything referring to a
+    local or another variable is not knowable here, so the variable
+    stays free text and Terraform remains the only check. Returns
+    ``None`` when there is no such validation.
+    """
+    pattern = (
+        r"contains\(\s*(?:to(?:set|list)\(\s*)?\[([^\]]*)\]\s*\)?\s*,\s*var\."
+        + re.escape(var_name)
+        + r"\s*\)"
+    )
+    match = re.search(pattern, var_block)
+    if not match:
+        return None
+    # HCL tolerates a trailing comma, JSON doesn't.
+    inner = re.sub(r",\s*$", "", match.group(1).strip())
+    try:
+        values = json.loads(f"[{inner}]")
+    except (ValueError, TypeError):
+        return None
+    if not values or not all(isinstance(v, (str, int, float, bool)) for v in values):
+        return None
+    return values
+
+
 def _parse_one_variable(
     *,
     var_name: str,
@@ -1020,6 +1058,13 @@ def _parse_one_variable(
         "required": required,
         "source": source,
     }
+
+    # A closed value set turns the free-text input into a dropdown. It
+    # coexists with markers; the wizard gives the resource picker
+    # precedence when both are present.
+    allowed = _allowed_values(var_name, var_block)
+    if allowed is not None:
+        var_info["allowedValues"] = allowed
 
     # Evaluate @openstack markers. Per-variable try/except: a typo in ONE
     # variable description must not block the whole wizard; the error
