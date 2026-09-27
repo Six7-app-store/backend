@@ -39,6 +39,7 @@ def _smtp_enabled_default(monkeypatch):
     monkeypatch.setattr(settings, "SMTP_ENABLED", True, raising=False)
     monkeypatch.setattr(settings, "SMTP_USER", "test@example.com", raising=False)
     monkeypatch.setattr(settings, "SMTP_PASSWORD", "test-password", raising=False)
+    monkeypatch.setattr(settings, "SMTP_HOST", "mail.example.org", raising=False)
 
 
 def _make_deployment_with_creds(

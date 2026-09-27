@@ -1869,8 +1869,8 @@ def resend_access_credentials(
     Access control: caller must have access to the deployment (owner
     or teacher/admin). The endpoint is intentionally idempotent —
     each call sends one mail to the targeted user. There's no rate
-    limit at the API level; SMTP and Gmail's per-account quota are
-    the natural backstops.
+    limit at the API level; the mail server's own sending limits are
+    the only backstop.
 
     Mapping ResendError to HTTP:
       * ``deployment_not_found`` → 404

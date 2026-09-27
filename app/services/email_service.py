@@ -6,21 +6,25 @@ user emails. The worker stays infrastructure-only.
 
 Sending strategy:
 
-* Gmail SMTP via ``settings.SMTP_*`` — App password required when 2FA is
-  on. The kill-switch is ``settings.SMTP_ENABLED`` (off by default); set
-  it to ``True`` and provide ``SMTP_USER`` / ``SMTP_PASSWORD`` to turn
-  delivery on. With either condition missing, ``send_email`` becomes a
-  no-op and returns ``False`` without raising.
-* Port-aware connection: ``465`` opens an implicit-TLS connection
-  (``SMTP_SSL``); anything else (typically ``587``) uses ``SMTP`` and
-  upgrades via STARTTLS. Some corporate networks (SAP intranet
-  included) block outbound 587 but allow 465 — switching is a config
-  change, no code edit.
+* Any SMTP server via ``settings.SMTP_*`` — no provider is assumed. The
+  kill-switch is ``settings.SMTP_ENABLED`` (off by default); set it to
+  ``True`` and provide a host and a sender to turn delivery on. With
+  either missing, ``send_email`` becomes a no-op and returns ``False``
+  without raising.
+* Authentication is optional. A relay that admits the platform by IP
+  address needs no ``SMTP_USER``; a submission account needs both
+  ``SMTP_USER`` and ``SMTP_PASSWORD``.
+* Transport per ``SMTP_SECURITY``: ``ssl`` opens an implicit-TLS
+  connection (``SMTP_SSL``), ``starttls`` upgrades a plain one, ``none``
+  stays plain for a relay inside a trusted network. ``auto`` derives it
+  from the port: ``465`` → ``ssl``, anything else → ``starttls``. Some
+  corporate networks block outbound 587 but allow 465 — switching is a
+  config change, no code edit.
 * MIME ``multipart/alternative`` with both an HTML and a plain-text
   body so clients without HTML rendering still see something legible.
   Templates live next to this file in ``templates/email/``.
-* Each ``send_email`` is its own SMTP connection (no pooling). Gmail
-  drops idle connections aggressively and the volume here is low —
+* Each ``send_email`` is its own SMTP connection (no pooling). Mail
+  servers drop idle connections aggressively and the volume here is low —
   one mail per user per deploy. Reuse would just add reconnect-on-
   expired complexity.
 
@@ -81,17 +85,38 @@ def render(template_name: str, **context: Any) -> str:
     return env.get_template(template_name).render(**context)
 
 
+def _sender() -> str:
+    """Envelope and header sender: the explicit address, else the login."""
+    return settings.SMTP_FROM_EMAIL or settings.SMTP_USER
+
+
+def _missing_config() -> str | None:
+    """Why delivery is off, or ``None`` when it may be attempted."""
+    if not settings.SMTP_ENABLED:
+        return "SMTP disabled (SMTP_ENABLED=false)"
+    if not settings.SMTP_HOST:
+        return "SMTP not configured (SMTP_HOST empty)"
+    if not _sender():
+        return "SMTP not configured (neither SMTP_FROM_EMAIL nor SMTP_USER set)"
+    if bool(settings.SMTP_USER) != bool(settings.SMTP_PASSWORD):
+        return "SMTP not configured (SMTP_USER and SMTP_PASSWORD must be set together)"
+    return None
+
+
 def is_smtp_enabled() -> bool:
     """Effective SMTP availability — the predicate every caller should use.
 
-    Both conditions must hold for mail delivery to even be attempted:
+    All conditions must hold for mail delivery to even be attempted:
       * ``SMTP_ENABLED`` is the explicit operator kill-switch (default
         ``False``). It exists so a dev / CI environment can leave the
-        Gmail app-password in ``.env`` for later but keep delivery off.
-      * ``SMTP_USER`` and ``SMTP_PASSWORD`` must be populated.
-        ``SMTP_ENABLED=True`` with empty credentials is treated as
-        "configuration in progress" and still skips delivery — better
-        than crashing at submit-time with an auth error.
+        connection settings in ``.env`` for later but keep delivery off.
+      * ``SMTP_HOST`` and a sender (``SMTP_FROM_EMAIL``, else
+        ``SMTP_USER``) must be populated.
+      * Credentials are all-or-nothing: none for a relay that admits the
+        platform by address, both user and password for an account.
+        Half a credential pair is treated as "configuration in
+        progress" and still skips delivery — better than crashing at
+        submit-time with an auth error.
 
     Returning a single boolean lets the resend-access endpoint
     short-circuit BEFORE accessing the deployment / notifier pipeline,
@@ -99,11 +124,38 @@ def is_smtp_enabled() -> bool:
     send") instead of leaking a 502 ("we tried and failed") when the
     cause is purely a configuration choice.
     """
-    return bool(
-        settings.SMTP_ENABLED
-        and settings.SMTP_USER
-        and settings.SMTP_PASSWORD
-    )
+    return _missing_config() is None
+
+
+def _security() -> str:
+    """Resolve ``SMTP_SECURITY=auto`` against the port."""
+    if settings.SMTP_SECURITY != "auto":
+        return settings.SMTP_SECURITY
+    return "ssl" if settings.SMTP_PORT == 465 else "starttls"
+
+
+def _connect() -> smtplib.SMTP:
+    """Open the connection, TLS per ``SMTP_SECURITY``, logged in if configured."""
+    # 30s timeout: a STARTTLS handshake can take 10-15s on first contact.
+    security = _security()
+    if security == "ssl":
+        smtp: smtplib.SMTP = smtplib.SMTP_SSL(
+            settings.SMTP_HOST, settings.SMTP_PORT, timeout=30,
+            context=ssl.create_default_context(),
+        )
+    else:
+        smtp = smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=30)
+    try:
+        if security == "starttls":
+            smtp.ehlo()
+            smtp.starttls(context=ssl.create_default_context())
+            smtp.ehlo()
+        if settings.SMTP_USER:
+            smtp.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+    except Exception:
+        smtp.close()
+        raise
+    return smtp
 
 
 def send_email(
@@ -113,24 +165,22 @@ def send_email(
     html_body: str,
     text_body: str,
 ) -> bool:
-    """Send a multipart HTML+text email via Gmail SMTP.
+    """Send a multipart HTML+text email via the configured SMTP server.
 
     Returns ``True`` on success, ``False`` if SMTP isn't configured or
     sending raised. Never raises — the deployment notification flow
     must keep going even if mail is broken.
     """
-    if not settings.SMTP_ENABLED:
-        logger.info("SMTP disabled (SMTP_ENABLED=false), skipping email to %s", to)
-        return False
-    if not settings.SMTP_USER or not settings.SMTP_PASSWORD:
-        logger.info("SMTP not configured (SMTP_USER empty), skipping email to %s", to)
+    reason = _missing_config()
+    if reason:
+        logger.info("%s, skipping email to %s", reason, to)
         return False
 
     recipients = [to] if isinstance(to, str) else list(to)
     if not recipients:
         return False
 
-    from_email = settings.SMTP_FROM_EMAIL or settings.SMTP_USER
+    from_email = _sender()
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
@@ -142,23 +192,8 @@ def send_email(
     msg.attach(MIMEText(html_body, "html", _charset="utf-8"))
 
     try:
-        # 30s timeout: Gmail's STARTTLS handshake can take 10-15s on
-        # first contact. Port 465 = implicit TLS (SMTPS); anything else
-        # = STARTTLS. Gmail accepts either.
-        if settings.SMTP_PORT == 465:
-            ctx = ssl.create_default_context()
-            with smtplib.SMTP_SSL(
-                settings.SMTP_HOST, settings.SMTP_PORT, timeout=30, context=ctx,
-            ) as smtp:
-                smtp.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
-                smtp.sendmail(from_email, recipients, msg.as_string())
-        else:
-            with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=30) as smtp:
-                smtp.ehlo()
-                smtp.starttls()
-                smtp.ehlo()
-                smtp.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
-                smtp.sendmail(from_email, recipients, msg.as_string())
+        with _connect() as smtp:
+            smtp.sendmail(from_email, recipients, msg.as_string())
         logger.info("Sent email to %s — subject=%r", recipients, subject)
         return True
     except Exception as e:

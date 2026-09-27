@@ -1,4 +1,6 @@
 
+from typing import Literal
+
 from pydantic_settings import BaseSettings
 
 
@@ -28,19 +30,29 @@ class Settings(BaseSettings):
     # Generate: python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
     CREDENTIAL_ENCRYPTION_KEY: str
 
-    # SMTP (Gmail). Required for the post-deploy notification mails.
-    # Use a Google "App password" (the regular password won't work with
-    # 2FA enabled).
+    # SMTP for the post-deploy notification mails. Any regular mail
+    # server works — the operator's own relay, a university mail host,
+    # or a submission account with credentials. No provider is assumed.
     #
     # SMTP_ENABLED is the explicit kill-switch — set it to False to turn
-    # mail delivery into a no-op even when credentials are populated. It
-    # lives separately from the credentials so operators can keep the
-    # app-password in .env while disabling mail in dev/CI, and so the
+    # mail delivery into a no-op even when the rest is populated. It
+    # lives separately from the connection settings so operators can
+    # keep them in .env while disabling mail in dev/CI, and so the
     # resend-access endpoint can distinguish "we chose not to send"
     # (HTTP 503) from "SMTP refused" (HTTP 502).
+    #
+    # SMTP_SECURITY picks the transport: "ssl" (implicit TLS, usually
+    # 465), "starttls" (usually 587), "none" (plain, only for a relay
+    # inside a trusted network, usually 25). "auto" keeps the old
+    # behaviour: 465 → ssl, anything else → starttls.
+    #
+    # SMTP_USER/SMTP_PASSWORD are optional: leave both empty for a relay
+    # that admits the platform by IP address. The sender is then
+    # SMTP_FROM_EMAIL, which becomes mandatory.
     SMTP_ENABLED: bool = False
-    SMTP_HOST: str = "smtp.gmail.com"
+    SMTP_HOST: str = ""
     SMTP_PORT: int = 587
+    SMTP_SECURITY: Literal["auto", "ssl", "starttls", "none"] = "auto"
     SMTP_USER: str = ""
     SMTP_PASSWORD: str = ""
     SMTP_FROM_EMAIL: str = ""
