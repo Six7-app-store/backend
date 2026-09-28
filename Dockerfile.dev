@@ -30,7 +30,7 @@ RUN curl -sSL https://install.python-poetry.org | python3 - && \
     ln -s /root/.local/bin/poetry /usr/local/bin/poetry
 
 # Copy dependency files
-COPY pyproject.toml ./
+COPY pyproject.toml poetry.lock ./
 
 # Install Python dependencies (ohne Projekt selbst)
 RUN poetry install --no-root --no-interaction --no-ansi
