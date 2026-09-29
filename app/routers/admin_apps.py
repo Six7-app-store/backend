@@ -7,7 +7,7 @@ from app.crud import app_version_approvals as crud_approvals
 from app.crud import apps as crud_apps
 from app.database import get_db
 from app.models import User
-from app.routers.apps import _serialize_app, load_variable_definitions
+from app.routers.apps import _serialize_app, ensure_valid_markers
 from app.schemas import (
     AppResponse,
     AppVersionApprovalDecision,
@@ -57,28 +57,7 @@ def approve_version(
     """
     app = _require_app(db, app_id)
 
-    # Block approval if any variable carries a marker error. If the git repo
-    # is unreachable (400/500), skip validation rather than hard-blocking.
-    try:
-        variables = load_variable_definitions(app, version_tag)
-        marker_errors = [
-            v.get("markerError") for v in variables if v.get("markerError")
-        ]
-        if marker_errors:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail={
-                    "message": (
-                        "Version kann nicht approved werden — fehlerhafte "
-                        "@openstack-Marker in den Variablen-Dateien"
-                    ),
-                    "marker_errors": marker_errors,
-                },
-            )
-    except HTTPException as exc:
-        if exc.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY:
-            raise
-        # 400 (no git_link) or 500 (git unreachable) — skip validation
+    ensure_valid_markers(app, version_tag, action="approved")
 
     return crud_approvals.approve(db, app_id, version_tag, current_user.userId)
 

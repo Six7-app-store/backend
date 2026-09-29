@@ -11,37 +11,10 @@ import socket
 import openstack
 from openstack import exceptions as os_exc
 
-from app.models import OpenStackAuthType
 from app.schemas import OpenStackCredentialUpsert
+from app.services.openstack_client import build_connect_kwargs
 
 _TIMEOUT_SECONDS = 15
-
-
-def _build_connect_kwargs(payload: OpenStackCredentialUpsert) -> dict:
-    base = {
-        "auth_url": payload.auth_url,
-        "region_name": payload.region_name,
-        "interface": payload.interface or "public",
-        "identity_api_version": payload.identity_api_version or "3",
-    }
-    if payload.auth_type == OpenStackAuthType.APPLICATION_CREDENTIAL:
-        base.update({
-            "auth_type": "v3applicationcredential",
-            "application_credential_id": payload.identifier,
-            "application_credential_secret": payload.secret,
-        })
-    else:
-        base.update({
-            "auth_type": "password",
-            "username": payload.identifier,
-            "password": payload.secret,
-            "project_id": payload.project_id,
-            "project_name": payload.project_name,
-            "user_domain_name": payload.user_domain_name,
-            "project_domain_name": payload.project_domain_name or payload.user_domain_name,
-        })
-    # openstack.connect tolerates None values for keys it doesn't need; keep them.
-    return base
 
 
 def validate(payload: OpenStackCredentialUpsert) -> tuple[bool, str | None]:
@@ -53,7 +26,7 @@ def validate(payload: OpenStackCredentialUpsert) -> tuple[bool, str | None]:
     prev_default_timeout = socket.getdefaulttimeout()
     socket.setdefaulttimeout(_TIMEOUT_SECONDS)
     try:
-        conn = openstack.connect(**_build_connect_kwargs(payload))
+        conn = openstack.connect(**build_connect_kwargs(payload.model_dump()))
         # Force a token round-trip; .authorize() returns the token string.
         conn.authorize()
         return True, None

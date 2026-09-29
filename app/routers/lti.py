@@ -218,6 +218,15 @@ def _require_lti_enabled() -> None:
         )
 
 
+def _misconfigured(what: str, e: Exception) -> HTTPException:
+    """An operator problem, not the caller's: log it, answer 503."""
+    logger.error(what, e)
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail={"code": "lti_misconfigured", "message": str(e)},
+    )
+
+
 def _tool_conf():
     """Tool configuration, or a 503 that says what is missing."""
     try:
@@ -225,11 +234,7 @@ def _tool_conf():
     except LtiConfigurationError as e:
         # Misconfiguration, not a bad request — say so in the log and
         # keep the detail generic for the caller.
-        logger.error("LTI configuration incomplete: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"code": "lti_misconfigured", "message": str(e)},
-        ) from e
+        raise _misconfigured("LTI configuration incomplete: %s", e) from e
 
 
 async def _read_params(request: StarletteRequest) -> dict[str, t.Any]:
@@ -264,11 +269,7 @@ def lti_jwks() -> dict:
     try:
         return get_tool_jwks()
     except LtiConfigurationError as e:
-        logger.error("LTI key unusable: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"code": "lti_misconfigured", "message": str(e)},
-        ) from e
+        raise _misconfigured("LTI key unusable: %s", e) from e
 
 
 # ----------------------------------------------------------------
@@ -392,11 +393,7 @@ async def lti_launch(
         # No signing secret configured. The launch itself was fine, so
         # this is an operator problem, not the caller's — 503, not 500,
         # and no stack trace in the response.
-        logger.error("Cannot issue LTI session token: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"code": "lti_misconfigured", "message": str(e)},
-        ) from e
+        raise _misconfigured("Cannot issue LTI session token: %s", e) from e
 
     logger.info(
         "LTI launch accepted for user %s (iss=%s, context=%s)",
@@ -672,11 +669,7 @@ def import_lti_context(
     try:
         result = import_context_roster(db, context, user, name=payload.name)
     except LtiConfigurationError as e:
-        logger.error("LTI configuration incomplete: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"code": "lti_misconfigured", "message": str(e)},
-        ) from e
+        raise _misconfigured("LTI configuration incomplete: %s", e) from e
     except LtiRosterError as e:
         # The platform said no or could not be reached. Nothing was
         # written: the roster is read before the first row is created.
@@ -808,11 +801,7 @@ def select_deep_link(
             custom={CUSTOM_APP_ID: str(app.appId)},
         )
     except LtiConfigurationError as e:
-        logger.error("Cannot sign deep-link response: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"code": "lti_misconfigured", "message": str(e)},
-        ) from e
+        raise _misconfigured("Cannot sign deep-link response: %s", e) from e
 
     logger.info(
         "Deep link selected by user %s: app %s (%s)", user.userId, app.appId, app.name

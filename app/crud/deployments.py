@@ -183,6 +183,25 @@ def get_deployment_created_at(db: Session, deployment_id: UUID):
     return task.created_at if task else None
 
 
+def _latest_task_subquery(db: Session, deployment_ids: list[UUID] | None = None):
+    """Subquery ``(did, status, type, rn)`` ranking each deployment's
+    tasks newest-first; ``rn == 1`` is the latest task."""
+    latest_rn = (
+        func.row_number()
+        .over(partition_by=Task.deploymentId, order_by=desc(Task.created_at))
+        .label("rn")
+    )
+    query = db.query(
+        Task.deploymentId.label("did"),
+        Task.status.label("status"),
+        Task.type.label("type"),
+        latest_rn,
+    )
+    if deployment_ids is not None:
+        query = query.filter(Task.deploymentId.in_(deployment_ids))
+    return query.subquery()
+
+
 def bulk_get_task_summary(
     db: Session, deployment_ids: list[UUID]
 ) -> dict[UUID, tuple[TaskStatus | None, TaskType | None, datetime | None]]:
@@ -198,23 +217,8 @@ def bulk_get_task_summary(
     if not deployment_ids:
         return {}
 
-    # Latest task per deployment via row_number() over (PARTITION BY ...
-    # ORDER BY created_at DESC).
-    latest_rn = (
-        func.row_number()
-        .over(partition_by=Task.deploymentId, order_by=desc(Task.created_at))
-        .label("rn")
-    )
-    latest_subq = (
-        db.query(
-            Task.deploymentId.label("did"),
-            Task.status.label("status"),
-            Task.type.label("type"),
-            latest_rn,
-        )
-        .filter(Task.deploymentId.in_(deployment_ids))
-        .subquery()
-    )
+    # Latest task per deployment.
+    latest_subq = _latest_task_subquery(db, deployment_ids)
     latest_rows = (
         db.query(latest_subq.c.did, latest_subq.c.status, latest_subq.c.type)
         .filter(latest_subq.c.rn == 1)
@@ -394,19 +398,7 @@ def get_deployments(
     # equivalent predicate here — before offset/limit — so the page size
     # stays correct.
     if status:
-        latest_rn = (
-            func.row_number()
-            .over(partition_by=Task.deploymentId, order_by=desc(Task.created_at))
-            .label("rn")
-        )
-        latest_subq = (
-            db.query(
-                Task.deploymentId.label("did"),
-                Task.status.label("status"),
-                Task.type.label("type"),
-                latest_rn,
-            ).subquery()
-        )
+        latest_subq = _latest_task_subquery(db)
         query = query.join(
             latest_subq,
             and_(

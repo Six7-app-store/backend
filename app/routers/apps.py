@@ -1397,6 +1397,32 @@ def get_app(
     return _serialize_app(app)
 
 
+def ensure_valid_markers(app, version: str, *, action: str) -> None:
+    """422 if any variable of ``version`` carries an ``@openstack`` marker
+    error. Git errors (400 no git_link / 500 unreachable) skip the check
+    rather than hard-blocking — submit and approve still work when the
+    repo is unreachable. ``action`` completes "Version kann nicht … werden".
+    """
+    try:
+        variables = load_variable_definitions(app, version)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY:
+            raise
+        return
+    marker_errors = [v.get("markerError") for v in variables if v.get("markerError")]
+    if marker_errors:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "message": (
+                    f"Version kann nicht {action} werden — fehlerhafte "
+                    "@openstack-Marker in den Variablen-Dateien"
+                ),
+                "marker_errors": marker_errors,
+            },
+        )
+
+
 # ----------------------------------------------------------------
 # GET APP VARIABLES
 # ----------------------------------------------------------------
@@ -1631,28 +1657,7 @@ def submit_version(
             detail="App has no git repository configured",
         )
 
-    # Marker validation — blocks submit on invalid @openstack markers.
-    # Same logic as the approve endpoint; git errors (400/500) are
-    # skipped so submit still works when the repo is unreachable.
-    try:
-        variables = load_variable_definitions(app, version_tag)
-        marker_errors = [v.get("markerError") for v in variables if v.get("markerError")]
-        if marker_errors:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail={
-                    "message": (
-                        "Version kann nicht eingereicht werden — fehlerhafte "
-                        "@openstack-Marker in den Variablen-Dateien"
-                    ),
-                    "marker_errors": marker_errors,
-                },
-            )
-    except HTTPException as exc:
-        if exc.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY:
-            raise
-        # 400 (no git_link, handled above) or 500 (git unreachable) —
-        # allow submit anyway.
+    ensure_valid_markers(app, version_tag, action="eingereicht")
 
     return crud_approvals.submit_version(
         db, app_id=app_id, version_tag=version_tag, diff_url=body.diff_url, notes=body.notes

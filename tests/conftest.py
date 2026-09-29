@@ -221,41 +221,32 @@ def mock_student(db):
 # ----------------------------------------------------------------
 # FastAPI-Test-Clients
 # ----------------------------------------------------------------
-def _make_client(user):
-    def override_get_db():
-        session = TestingSessionLocal()
+def _override_get_db():
+    session = TestingSessionLocal()
+    try:
+        yield session
+    finally:
         try:
-            yield session
+            session.rollback()
         finally:
-            try:
-                session.rollback()
-            finally:
-                session.close()
+            session.close()
 
+
+def _make_client(user):
     def override_get_current_user():
         return user
 
-    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_db] = _override_get_db
     app.dependency_overrides[get_current_user] = override_get_current_user
     return TestClient(app)
 
 
 @pytest.fixture
 def client(mock_user):
-    def override_get_db():
-        session = TestingSessionLocal()
-        try:
-            yield session
-        finally:
-            try:
-                session.rollback()
-            finally:
-                session.close()
-
     def override_get_current_user():
         return mock_user
 
-    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_db] = _override_get_db
     app.dependency_overrides[get_current_user] = override_get_current_user
 
     with TestClient(app) as c:
@@ -280,17 +271,7 @@ def student_client(mock_student):
 
 @pytest.fixture
 def unauth_client():
-    def override_get_db():
-        session = TestingSessionLocal()
-        try:
-            yield session
-        finally:
-            try:
-                session.rollback()
-            finally:
-                session.close()
-
-    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_db] = _override_get_db
 
     with TestClient(app) as c:
         yield c

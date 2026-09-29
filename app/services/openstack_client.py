@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------------
 # Connection-Bau
 # ----------------------------------------------------------------
-def _build_connect_kwargs(creds: dict) -> dict:
+def build_connect_kwargs(creds: dict) -> dict:
     """Build the kwargs dict for ``openstack.connect`` from decrypted
     user credentials. Supports password and application-credential
     (v3applicationcredential) auth.
@@ -88,7 +88,7 @@ def user_connection(db: Session, user: User) -> Iterator[Any]:
 
     conn = None
     try:
-        conn = openstack.connect(**_build_connect_kwargs(creds))
+        conn = openstack.connect(**build_connect_kwargs(creds))
         yield conn
     except HTTPException:
         raise

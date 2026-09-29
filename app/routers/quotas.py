@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.crud import openstack_credentials as crud_creds
 from app.database import get_db
 from app.models import User
+from app.services.openstack_client import build_connect_kwargs
 from app.utils.auth import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -49,32 +50,6 @@ class QuotaOverviewResponse(BaseModel):
     network: NetworkQuotas
 
 
-def _build_connect_kwargs(creds: dict) -> dict:
-    base = {
-        "auth_url": creds["auth_url"],
-        "region_name": creds.get("region_name"),
-        "interface": creds.get("interface") or "public",
-        "identity_api_version": creds.get("identity_api_version") or "3",
-    }
-    if creds["auth_type"] == "v3applicationcredential":
-        base.update({
-            "auth_type": "v3applicationcredential",
-            "application_credential_id": creds["identifier"],
-            "application_credential_secret": creds["secret"],
-        })
-    else:
-        base.update({
-            "auth_type": "password",
-            "username": creds["identifier"],
-            "password": creds["secret"],
-            "project_id": creds.get("project_id"),
-            "project_name": creds.get("project_name"),
-            "user_domain_name": creds.get("user_domain_name"),
-            "project_domain_name": creds.get("project_domain_name") or creds.get("user_domain_name"),
-        })
-    return base
-
-
 def _quota_item(used: int, obj, attr: str, default: int, unit: str | None = None) -> QuotaItem:
     """Build a QuotaItem, reading the limit from ``obj.attr`` (with ``default``)
     exactly once. ``available`` is ``limit - used`` and is intentionally not
@@ -92,7 +67,7 @@ def _get_openstack_conn_for_user(db: Session, user: User):
             status_code=status.HTTP_412_PRECONDITION_FAILED,
             detail={"reason": "openstack_credentials_missing"},
         )
-    return openstack.connect(**_build_connect_kwargs(creds))
+    return openstack.connect(**build_connect_kwargs(creds))
 
 
 @router.get("/overview", response_model=QuotaOverviewResponse)

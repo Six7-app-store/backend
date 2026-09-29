@@ -7,7 +7,7 @@ import threading
 
 from fastapi import HTTPException, status
 from jose import JWTError, jwt
-from keycloak import KeycloakAdmin, KeycloakAuthenticationError, KeycloakOpenID
+from keycloak import KeycloakAdmin, KeycloakOpenID
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -69,34 +69,6 @@ def _get_realm_public_key_pem() -> str:
 # ----------------------------------------------------------------
 # TOKEN VALIDATION
 # ----------------------------------------------------------------
-def verify_keycloak_token(token: str) -> dict:
-    """Validate token via Keycloak introspection (slow, server round-trip)."""
-    try:
-        keycloak_client = get_keycloak_client()
-        token_info = keycloak_client.introspect(token)
-        if not token_info.get("active"):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Token is not active or has expired",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        return token_info
-    except KeycloakAuthenticationError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication failed",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    except HTTPException:
-        raise
-    except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-
 def verify_keycloak_token_offline(token: str) -> dict:
     """Validate JWT signature against Keycloak public key (fast, no server round-trip)."""
     try:
