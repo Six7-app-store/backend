@@ -131,6 +131,10 @@ def upsert_my_credentials_from_yaml(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """Like ``PUT /me/openstack-credentials``, but read from a pasted ``clouds.yaml``.
+
+    ``cloud_name`` picks the entry when the file defines more than one.
+    """
     crud_locks.acquire_user_xact_lock(db, current_user.userId)
     _assert_unlocked(db, current_user)
     payload = clouds_yaml_parser.parse(body.clouds_yaml, body.cloud_name)
@@ -187,6 +191,7 @@ def delete_my_credentials(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """Delete the stored credential. Refused while it is locked by active deployments."""
     crud_locks.acquire_user_xact_lock(db, current_user.userId)
     _assert_unlocked(db, current_user)
     deleted = crud_creds.delete(db, current_user.userId)
