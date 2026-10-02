@@ -5,41 +5,19 @@ router uses must be declared in ``OPENAPI_TAGS`` -- a unit test checks it.
 """
 
 API_DESCRIPTION = """
-REST API of the Click-n-Deploy App Store. The frontend uses it to browse the
-app catalog, deploy apps into the caller's own OpenStack project and manage
-courses and teams around those deployments.
+REST API of the Click-n-Deploy App Store: browse the app catalog, deploy apps
+into the caller's own OpenStack project and manage courses and teams.
 
-## Authentication
+**Auth** — `Authorization: Bearer <token>`, either a Keycloak access token or
+an LTI session token (issued after a verified Moodle launch, `POST /lti/launch`).
+Both resolve to the same user; a few actions (linking a Moodle identity) refuse
+an LTI session with `403 direct_login_required`.
 
-Every endpoint except `/health`, `/auth/health` and the LTI handshake expects
-`Authorization: Bearer <token>`. Two kinds of token are accepted:
+**Roles** — `student`, `teacher`, `admin`; role-gated endpoints answer `403
+{"code": "role_required", ...}`. Resource access is decided per resource on top.
 
-* a **Keycloak access token** from the direct login, and
-* an **LTI session token** this backend issues after a verified launch from
-  Moodle (`POST /lti/launch`).
-
-Both resolve to the same user. A few actions (linking a Moodle identity) must
-be authorised by the account owner and refuse an LTI session with
-`403 direct_login_required`.
-
-## Roles
-
-`student`, `teacher` and `admin`. Endpoints restricted by role answer
-`403` with `{"code": "role_required", "required": [...]}`. Access to a single
-resource (a deployment, a course) is decided per resource on top of that —
-owner, team member, course teacher or admin.
-
-## Errors
-
-Errors use FastAPI's `{"detail": ...}` envelope. `detail` is either a plain
-message or an object with a machine-readable `code` and a `message`, so the
-frontend can tell failures apart without parsing text.
-
-## Long-running work
-
-Creating, destroying, pausing or resuming a deployment enqueues a Celery task
-and returns immediately. Progress is streamed as Server-Sent Events from
-`GET /deployments/{id}/stream`; the task history is at `/tasks`.
+**Errors** — FastAPI's `{"detail": ...}` envelope; `detail` may carry a
+machine-readable `code`.
 """
 
 OPENAPI_TAGS = [
@@ -74,7 +52,8 @@ OPENAPI_TAGS = [
         "name": "Deployments",
         "description": "Creating, inspecting, pausing, resuming and destroying "
         "deployments of an app version into the caller's OpenStack project, "
-        "their cloud resources and a live event stream.",
+        "and their cloud resources. These actions enqueue a Celery task and "
+        "return at once; progress streams via SSE from `GET /deployments/{id}/stream`.",
     },
     {"name": "Tasks", "description": "Worker tasks belonging to a deployment and their status."},
     {"name": "Teams", "description": "Teams that share deployments."},
