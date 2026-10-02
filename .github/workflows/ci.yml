@@ -338,8 +338,20 @@ jobs:
 
       - name: pip-audit (production deps, HIGH+)
         run: |
-          poetry run python -m pip install --upgrade pip
-          poetry run python -m pip install pip-audit
+          # Audit ONLY the production dependency graph, not the installed
+          # venv. `poetry install --no-root` also pulls in the dev group
+          # (pre-commit → virtualenv, mypy, …) and this step then adds
+          # pip-audit itself; auditing the venv would flag all of those,
+          # none of which ship in the production image. Export the `main`
+          # group to a requirements file and audit that instead, so the
+          # step matches its name.
+          #
+          # Poetry 2.x unbundled `export`, so install the plugin first.
+          poetry self add poetry-plugin-export
+          poetry export --only main --without-hashes -f requirements.txt -o requirements-prod.txt
+          # pip-audit runs from an isolated pipx-style install so it does
+          # not pollute the audited set.
+          python -m pip install --upgrade pip pip-audit
           # PYSEC-2026-1325 (ecdsa): Minerva timing side-channel on
           # P-256. No upstream fix — python-ecdsa considers side-channel
           # attacks out of scope, so this will never be resolved. It's
@@ -349,7 +361,7 @@ jobs:
           # attack surface is not present. Ignored here rather than left
           # to fail --strict indefinitely. Revisit if we ever sign with
           # ecdsa or migrate off python-jose (e.g. to PyJWT).
-          poetry run pip-audit --strict --ignore-vuln PYSEC-2026-1325
+          pip-audit --strict --ignore-vuln PYSEC-2026-1325 -r requirements-prod.txt
 
       # Trivy fs runs twice on purpose:
       #   1. blocking gate — fails the job on HIGH/CRITICAL

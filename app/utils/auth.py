@@ -28,7 +28,10 @@ from app.utils.lti_session import decode_session_token, is_session_token
 
 logger = logging.getLogger(__name__)
 
-security = HTTPBearer()
+security = HTTPBearer(
+    bearerFormat="JWT",
+    description="Keycloak access token or LTI session token from `POST /lti/launch`.",
+)
 
 _INVALID = HTTPException(
     status_code=status.HTTP_401_UNAUTHORIZED,
