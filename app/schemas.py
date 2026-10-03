@@ -562,3 +562,39 @@ class OpenStackCredentialResponse(OpenStackCredentialBase):
     active_deployments: int = 0
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# ----------------------------------------------------------------
+# UI SETTINGS SCHEMAS
+# ----------------------------------------------------------------
+LogoVariant = Literal["light", "dark", "icon"]
+
+# ``#RRGGBB`` only — the frontend derives shades from it and needs the full triplet.
+ACCENT_COLOR_PATTERN = r"^#[0-9a-fA-F]{6}$"
+
+
+class UiLogos(BaseModel):
+    """Which logos an admin uploaded. ``False`` means the built-in default applies."""
+
+    light: bool = False
+    dark: bool = False
+    icon: bool = False
+
+
+class UiSettingsResponse(BaseModel):
+    # ``None`` means the built-in default (DHBW red).
+    accentColor: str | None = None
+    logos: UiLogos = Field(default_factory=UiLogos)
+    # Changes on every save; the frontend appends it to the logo URLs so a
+    # replaced logo is not served from the browser cache.
+    updatedAt: datetime | None = None
+
+
+class UiSettingsUpdate(BaseModel):
+    # ``null`` resets to the default; leaving the field out keeps the current value.
+    accentColor: str | None = Field(default=None, pattern=ACCENT_COLOR_PATTERN)
+
+
+class UiLogoUpload(BaseModel):
+    # ``data:image/<type>;base64,<...>``, the same format as an app's image.
+    image: str
