@@ -509,3 +509,32 @@ class LtiContext(Base):
 
     # Relationships
     course = relationship("Course", back_populates="lti_contexts")
+
+
+# ----------------------------------------------------------------
+# UI SETTINGS MODEL
+# ----------------------------------------------------------------
+class UiSettings(Base):
+    """The instance's look, as an admin set it: accent colour and logos.
+
+    A single row (``id = 1``). Every column is nullable, and ``NULL``
+    means "the frontend's built-in default" — so a fresh installation
+    needs no row at all, and resetting a value is setting it back to
+    ``NULL`` rather than copying the default into the database.
+    """
+
+    __tablename__ = "ui_settings"
+
+    id = Column(Integer, primary_key=True, default=1)
+    # ``#RRGGBB``; the frontend derives hover, text and dark-theme shades from it.
+    accent_color = Column(String(7), nullable=True)
+    # Wordmark on light backgrounds, wordmark on dark backgrounds, and the
+    # small emblem (collapsed sidebar, favicon). Bytes plus their mime, as
+    # with ``App.image``.
+    logo_light = Column(LargeBinary, nullable=True)
+    logo_light_mime = Column(String(64), nullable=True)
+    logo_dark = Column(LargeBinary, nullable=True)
+    logo_dark_mime = Column(String(64), nullable=True)
+    logo_icon = Column(LargeBinary, nullable=True)
+    logo_icon_mime = Column(String(64), nullable=True)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)

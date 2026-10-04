@@ -60,6 +60,11 @@ OPENAPI_TAGS = [
     {"name": "Quotas", "description": "Usage and limits of the caller's OpenStack project."},
     {"name": "Dashboard", "description": "Aggregated figures for the start page."},
     {
+        "name": "UI Settings",
+        "description": "The instance's look: accent colour and logos. Readable without "
+        "authentication (the login page uses them), changeable by admins only.",
+    },
+    {
         "name": "OpenStack Credentials",
         "description": "The caller's own OpenStack credential. Stored encrypted, "
         "validated against Keystone before it is saved, and locked while the "

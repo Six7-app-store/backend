@@ -22,6 +22,7 @@ from app.routers import (
     quotas,
     tasks,
     teams,
+    ui_settings,
     users,
 )
 from app.services.celery_event_listener import start_event_listener
@@ -134,6 +135,8 @@ app.include_router(tasks.router, prefix="/tasks", tags=["Tasks"])
 app.include_router(teams.router, prefix="/teams", tags=["Teams"])
 app.include_router(quotas.router, prefix="/quotas", tags=["Quotas"])
 app.include_router(dashboard.router, prefix="/dashboard", tags=["Dashboard"])
+# Readable without a login: the login page already shows logo and accent.
+app.include_router(ui_settings.router, prefix="/ui-settings", tags=["UI Settings"])
 app.include_router(openstack_credentials.router, tags=["OpenStack Credentials"])
 # Read API for OpenStack resources (Networks, Flavors, Images, ...),
 # used by the wizard's value-help dropdowns so users don't have to type
