@@ -7,7 +7,7 @@ importantly — the guarantee that a member never receives a teammate's
 credentials in the response.
 
 Unlike the resend-access tests, the notifier is NOT patched out here:
-we seed a real successful DEPLOY task carrying terraform ``user_accounts``
+we seed a real successful DEPLOY task carrying tofu ``user_accounts``
 outputs and assert on the extracted, filtered response so the end-to-end
 extraction path (crud → notifier._find_account_for_user) is exercised.
 """
@@ -51,7 +51,7 @@ def _seed_deployment_with_outputs(db, owner, members, *, outputs=None, team_name
         appId=app.appId,
         userId=owner.userId,
         releaseTag="v1.0.0",
-        userInputVar=json.dumps({"terraform": {}, "packer": {}}),
+        userInputVar=json.dumps({"tofu": {}}),
     )
     db.add(deployment)
     db.flush()
@@ -90,7 +90,7 @@ def _seed_deployment_with_outputs(db, owner, members, *, outputs=None, team_name
 
 
 def _outputs_for(team_name, *accounts):
-    """Build a terraform-outputs dict with a ``user_accounts`` map.
+    """Build a tofu-outputs dict with a ``user_accounts`` map.
 
     Each ``accounts`` entry is ``(key_suffix, username, password)``; the
     map key is ``"<team>-<key_suffix>"`` mirroring the template contract.

@@ -137,7 +137,7 @@ def ensure_deployment_access(deployment: Deployment, user: User, db: Session) ->
 def is_deployment_owner_view(deployment: Deployment, user: User) -> bool:
     """True if ``user`` should see the *owner view* of ``deployment``.
 
-    The owner view shows everything (tasks, logs, terraform state, full
+    The owner view shows everything (tasks, logs, tofu state, full
     team rosters, destroy/delete); the member view shows only deployment
     metadata, the user's own team, and resend-credentials for themself.
     Teachers, admins, and the deployment creator get the owner view.

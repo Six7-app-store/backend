@@ -200,7 +200,7 @@ def sync_user_from_keycloak(db: Session, keycloak_user_data: dict) -> User:
         user.email = email
         updated = True
     # Username is the login identifier shown in the UI and in
-    # Terraform-issued credentials; keep it in sync too.
+    # OpenTofu-issued credentials; keep it in sync too.
     if username and user.username != username:
         user.username = username
         updated = True

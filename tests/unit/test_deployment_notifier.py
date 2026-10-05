@@ -36,7 +36,7 @@ def _make_user(*, username: str, email: str, first: str = "", last: str = "") ->
     )
 
 
-def _terraform_outputs_for(team_name: str, user) -> dict:
+def _tofu_outputs_for(team_name: str, user) -> dict:
     """Return a minimal ``{value: ...}`` outputs blob that
     ``_access_for_user`` can match against the given user.
 
@@ -96,7 +96,7 @@ def test_notify_deployment_succeeded_sends_emails_to_all_members():
     # Outputs cover both team members so every per-user mail finds a
     # credential and we exercise the happy path for both.
     outputs = {
-        "team_vms": _terraform_outputs_for("Team-1", alice)["team_vms"],
+        "team_vms": _tofu_outputs_for("Team-1", alice)["team_vms"],
         "user_accounts": {
             "value": {
                 f"Team-1-{alice.username}": {
@@ -169,7 +169,7 @@ def test_resend_user_access_to_single_recipient():
         user=owner,
     )
 
-    outputs = _terraform_outputs_for("Team-1", alice)
+    outputs = _tofu_outputs_for("Team-1", alice)
 
     # The notifier reads the latest successful DEPLOY task and decodes
     # ``outputs`` (str or dict). We give it a stringified JSON so the

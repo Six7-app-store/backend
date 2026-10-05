@@ -1,10 +1,10 @@
-"""Unit tests for ``app/services/tf_state_parser.py``.
+"""Unit tests for ``app/services/tofu_state_parser.py``.
 
 Pure-function coverage: no FastAPI, no DB, no OpenStack SDK.
 """
 import pytest
 
-from app.services.tf_state_parser import parse_tf_state
+from app.services.tofu_state_parser import parse_tf_state
 
 # ----------------------------------------------------------------
 # Fixture state — mirrors the shape of the Online-IDE app's state
@@ -96,8 +96,8 @@ def test_parses_compute_instances_with_team_tag():
 
 
 @pytest.mark.unit
-def test_address_format_matches_terraform_state_list():
-    """``terraform state list`` prints quoted for_each keys — our
+def test_address_format_matches_tofu_state_list():
+    """``tofu state list`` prints quoted for_each keys — our
     addresses must match byte-for-byte so they round-trip into
     ``-target=`` and ``-replace=`` arguments."""
     result = parse_tf_state(_ONLINE_IDE_STATE)
@@ -222,7 +222,7 @@ def test_invalid_or_empty_state_returns_empty_list(bad):
 @pytest.mark.unit
 def test_accepts_pre_parsed_dict():
     """The Task.tf_state column stores a JSON string, but callers
-    sometimes pass an already-parsed dict (e.g. from terraform CLI
+    sometimes pass an already-parsed dict (e.g. from tofu CLI
     output)."""
     assert parse_tf_state({"resources": []}) == []
     result = parse_tf_state(_ONLINE_IDE_STATE)
@@ -244,3 +244,41 @@ def test_display_name_falls_back_to_address():
     }
     result = parse_tf_state(state)
     assert result[0].display_name == "openstack_networking_secgroup_v2.sg"
+
+
+def _single(resource_type: str, name: str, instance: dict) -> dict:
+    return {"resources": [{"type": resource_type, "name": name, "instances": [instance]}]}
+
+
+@pytest.mark.unit
+def test_security_group_without_name_uses_description():
+    """SGs often carry only a description; that beats the raw address."""
+    state = _single(
+        "openstack_networking_secgroup_v2",
+        "sg",
+        {"attributes": {"id": "sg-1", "description": "SSH from campus"}},
+    )
+    assert parse_tf_state(state)[0].display_name == "SSH from campus"
+
+
+@pytest.mark.unit
+def test_non_string_team_tag_yields_none():
+    """``metadata.team`` must be a non-empty string to count."""
+    state = _single(
+        "openstack_compute_instance_v2",
+        "vm",
+        {"attributes": {"id": "vm-1", "name": "vm", "metadata": {"team": 7}}},
+    )
+    assert parse_tf_state(state)[0].team is None
+
+
+@pytest.mark.unit
+def test_unexpected_index_key_type_falls_back_to_plain_address():
+    """A float index (never produced by tofu) degrades to the bare
+    address instead of crashing the Infrastructure tab."""
+    state = _single(
+        "openstack_compute_instance_v2",
+        "vm",
+        {"index_key": 1.5, "attributes": {"id": "vm-1", "name": "vm"}},
+    )
+    assert parse_tf_state(state)[0].address == "openstack_compute_instance_v2.vm"

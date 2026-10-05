@@ -21,14 +21,10 @@ class GitService:
     """Service for Git operations and release management."""
 
     # Sparse-checkout allowlist for the variable scan (non-cone mode,
-    # ``.gitignore`` pathspecs). ``packer/`` matches the whole subtree so
-    # both the flat layout (``packer/variables.pkr.hcl``) and per-template
-    # layout (``packer/<key>/variables.pkr.hcl``) plus the
-    # ``template.pkr.hcl`` files are fetched. ``terraform/variables.tf``
-    # is a single file since only the variables file is needed.
+    # ``.gitignore`` pathspecs). Only the OpenTofu variables file is
+    # needed; see ``TOFU_VARIABLES_FILE`` in ``routers/apps.py``.
     SPARSE_CHECKOUT_FILES = [
-        'terraform/variables.tf',
-        'packer/',
+        'tofu/variables.tofu',
     ]
 
     def __init__(self) -> None:
