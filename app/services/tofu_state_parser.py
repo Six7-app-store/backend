@@ -1,19 +1,19 @@
-"""Generic Terraform-state parser for the deployment status pipeline.
+"""Generic OpenTofu-state parser for the deployment status pipeline.
 
 Reads the JSON blob persisted in ``Task.tf_state`` (produced by
-``terraform state pull`` in the worker — see
-``worker/app/tasks.py:collect_terraform_state``) and produces a flat,
+``tofu state pull`` in the worker — see
+``worker/app/tasks.py:collect_tofu_state``) and produces a flat,
 typed list of resource entries the rest of the status pipeline can
 join with live OpenStack data.
 
 Design choices:
 
 * Whitelist of resource types, not free-form pass-through: the state
-  file contains random_password / data sources / Terraform-internal
+  file contains random_password / data sources / OpenTofu-internal
   resources we don't surface. We filter to OpenStack kinds that map
   onto a meaningful UI card.
 
-* Address strings match ``terraform state list`` exactly (for both
+* Address strings match ``tofu state list`` exactly (for both
   ``count.index`` and ``for_each``), so they round-trip as
   ``-target=`` / ``-replace=`` arguments without translation.
 
@@ -59,10 +59,10 @@ _TYPE_TO_CATEGORY: dict[str, ResourceCategory] = {
 
 @dataclass
 class TfResource:
-    """One resource instance from the Terraform state.
+    """One resource instance from the OpenTofu state.
 
     Attributes:
-        address: Full state address (``terraform state list`` format).
+        address: Full state address (``tofu state list`` format).
                  Examples:
                    * ``openstack_compute_instance_v2.team_ide["Team-A"]``
                    * ``openstack_networking_network_v2.shared``
@@ -93,7 +93,7 @@ class TfResource:
 
 
 def parse_tf_state(state_json: str | dict | None) -> list[TfResource]:
-    """Parse a ``terraform state pull`` JSON blob into a typed list.
+    """Parse a ``tofu state pull`` JSON blob into a typed list.
 
     Accepts the raw string (as stored in ``Task.tf_state``) or an
     already-parsed dict. Returns an empty list for ``None`` / invalid
@@ -188,7 +188,7 @@ def _build_entry(
 def _format_address(
     *, resource_type: str, resource_name: str, instance: dict
 ) -> str:
-    """Build the ``terraform state list``-style address string.
+    """Build the ``tofu state list``-style address string.
 
     Three shapes we need to support:
       * Simple resource (no index_key)   → ``type.name``
@@ -196,7 +196,7 @@ def _format_address(
       * ``for_each`` (string index_key)  → ``type.name["Team-A"]``
 
     The double-quotes around for_each keys MUST be present — they're
-    part of the terraform CLI contract for ``-target=`` / ``-replace=``.
+    part of the tofu CLI contract for ``-target=`` / ``-replace=``.
     The frontend URL-encodes them before the redeploy call and FastAPI
     restores them.
     """

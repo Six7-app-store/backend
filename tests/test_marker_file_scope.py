@@ -126,21 +126,6 @@ def test_file_marker_rejects_malformed_extensions():
 
 
 @pytest.mark.unit
-def test_file_marker_rejected_for_packer_source():
-    """Packer-Variablen können keine Files transportieren — der Files-
-    Pfad mergt hartcodiert in ``userInputVar.terraform``. Statt einer
-    stillen Falle: Marker-Fehler."""
-    with pytest.raises(MarkerError) as exc:
-        _parse_marker(
-            "task_pdf",
-            "map(object({}))",
-            "Files @openstack:file:all:pdf",
-            source="packer",
-        )
-    assert "packer" in exc.value.message.lower() or "Packer" in exc.value.message
-
-
-@pytest.mark.unit
 @pytest.mark.parametrize(
     "scope, hcl_type, ok",
     [
@@ -226,7 +211,7 @@ def test_var_scope_typo_gets_suggestion():
 @pytest.mark.unit
 def test_var_scope_team_requires_map_hcl_type():
     """Skalare HCL-Types passen nicht zu ``team``/``user`` — der Wizard
-    schickt eine Map pro Slot, Terraform würde sie sonst beim Apply
+    schickt eine Map pro Slot, OpenTofu würde sie sonst beim Apply
     ablehnen."""
     with pytest.raises(MarkerError):
         _validate_scoped_var_shape("flavor_id", "string", "team")
@@ -237,18 +222,6 @@ def test_var_scope_team_requires_map_hcl_type():
     _validate_scoped_var_shape("flavor_id", "map(list(string))", "user")
     # ``all`` bypasses the shape check entirely.
     _validate_scoped_var_shape("flavor_id", "string", "all")
-
-
-@pytest.mark.unit
-def test_packer_rejects_non_all_var_scope():
-    with pytest.raises(MarkerError) as exc:
-        _parse_marker(
-            "team_image_size",
-            "map(string)",
-            "@openstack:::team",
-            source="packer",
-        )
-    assert "packer" in exc.value.message.lower() or "Packer" in exc.value.message
 
 
 @pytest.mark.unit
@@ -263,8 +236,7 @@ def test_parse_one_variable_emits_var_scope_for_scoped_resource(tmp_path):
         var_block=block,
         var_block_offset=0,
         file_content=block,
-        file_label="terraform/variables.tf",
-        source="terraform",
+        file_label="tofu/variables.tofu",
     )
     assert out.get("osType") == "flavor"
     assert out.get("osMode") == "id"
@@ -285,8 +257,7 @@ def test_parse_one_variable_emits_file_ext_and_var_scope_mirror(tmp_path):
         var_block=block,
         var_block_offset=0,
         file_content=block,
-        file_label="terraform/variables.tf",
-        source="terraform",
+        file_label="tofu/variables.tofu",
     )
     assert out.get("osType") == "file"
     assert out.get("osScope") == "all"
@@ -314,8 +285,7 @@ def test_parse_one_variable_attaches_marker_error_for_type_mismatch():
         var_block=block,
         var_block_offset=0,
         file_content=block,
-        file_label="terraform/variables.tf",
-        source="terraform",
+        file_label="tofu/variables.tofu",
     )
     assert "markerError" in out
     assert out["markerError"]["variable"] == "broken_files"
@@ -336,8 +306,7 @@ def test_parse_one_variable_attaches_marker_error_for_scoped_string_var():
         var_block=block,
         var_block_offset=0,
         file_content=block,
-        file_label="terraform/variables.tf",
-        source="terraform",
+        file_label="tofu/variables.tofu",
     )
     # team/user requires map(...) — string fails the shape check.
     assert "markerError" in out

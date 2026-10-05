@@ -282,7 +282,7 @@ def _handle_task_succeeded(celery_task_id: str) -> tuple[dict, Any]:
     if isinstance(result, dict):
         logs_data = result.get('logs')
         tf_state = result.get('tf_state')
-        outputs = result.get('terraform_outputs')
+        outputs = result.get('tofu_outputs')
     else:
         logs_data = None
         tf_state = None
@@ -348,7 +348,7 @@ def _apply_structured_failure(update_data: dict, failure_data: dict) -> None:
     """Fold the parsed worker ``Failure`` payload into ``update_data``.
 
     Mutates ``update_data`` in place: normalizes logs, appends the error
-    line and optional commit info, and copies tf_state / terraform_outputs.
+    line and optional commit info, and copies tf_state / tofu_outputs.
     """
     # logs
     logs_data = failure_data.get('logs')
@@ -370,9 +370,9 @@ def _apply_structured_failure(update_data: dict, failure_data: dict) -> None:
             commit_str += f"\n   Author: {commit.get('author', 'N/A')}"
             current_logs = update_data.get('logs', '') or ''
             update_data['logs'] = current_logs + commit_str
-    # terraform_outputs
-    if 'terraform_outputs' in failure_data:
-        tf_outputs = failure_data['terraform_outputs']
+    # tofu_outputs
+    if 'tofu_outputs' in failure_data:
+        tf_outputs = failure_data['tofu_outputs']
         if isinstance(tf_outputs, dict):
             update_data['outputs'] = json.dumps(tf_outputs, indent=2)
         else:
@@ -426,8 +426,8 @@ def _handle_task_failed(celery_task_id: str, event: dict) -> tuple[dict, str | N
     try:
         failure_data = _parse_structured_failure(exception_type, traceback)
         if failure_data is not None:
-            # Structured worker-side failure (terraform apply, packer
-            # build, etc.).
+            # Structured worker-side failure (tofu apply, tofu
+            # destroy, etc.).
             failure_kind = "worker_failure"
             _apply_structured_failure(update_data, failure_data)
             logger.info(f"[FAILED] Extracted structured failure data for {celery_task_id}: {update_data}")
@@ -480,7 +480,7 @@ def _notify_deploy_succeeded(db: Session, task, outputs: Any) -> None:
         deployment_notifier.notify_deployment_succeeded(
             db,
             task.deploymentId,
-            terraform_outputs=outputs if isinstance(outputs, dict) else None,
+            tofu_outputs=outputs if isinstance(outputs, dict) else None,
         )
     except Exception as e:
         logger.warning(

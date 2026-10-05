@@ -7,7 +7,7 @@ can render progress.
 
 Every endpoint enforces ``ensure_deployment_access`` (to prevent IDOR) plus
 ``ensure_deployment_owner_view``, so only the deployment creator, teachers, and
-admins can read task logs — which contain Terraform outputs, IPs, and worker
+admins can read task logs — which contain OpenTofu outputs, IPs, and worker
 stack traces. Members get a 403 even though they can read deployment metadata.
 """
 

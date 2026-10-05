@@ -177,7 +177,7 @@ def ensure_view_deployment_member(user: User, dep: Deployment, db: Session) -> N
 
 
 def can_view_deployment_owner(user: User, dep: Deployment, db: Session) -> bool:
-    """Owner-view access — tasks, logs, terraform state, destroy.
+    """Owner-view access — tasks, logs, tofu state, destroy.
 
     Read access is granted to the deployment owner, admins, and
     course-teachers of the deployment owner's course (inspect only).

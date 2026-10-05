@@ -42,7 +42,7 @@ class TaskType(str, enum.Enum):
     PAUSE = "pause"
     RESUME = "resume"
     # Single-resource redeploy of ONE Compute-Instance via
-    # ``terraform apply -replace=<addr> -target=<addr>``, without
+    # ``tofu apply -replace=<addr> -target=<addr>``, without
     # touching the other team VMs of the same deployment.
     REDEPLOY = "redeploy"
 
@@ -224,8 +224,8 @@ class Task(Base):
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)
     logs = Column(Text, nullable=True)  # JSON or text
-    tf_state = Column(Text, nullable=True)  # Terraform state as JSON/text
-    outputs = Column(Text, nullable=True)  # Terraform outputs as JSON/text
+    tf_state = Column(Text, nullable=True)  # OpenTofu state as JSON/text
+    outputs = Column(Text, nullable=True)  # OpenTofu outputs as JSON/text
     # Live-progress columns, updated by the celery event listener on
     # each ``task-progress`` event. Advisory only — the SSE stream is
     # canonical; these let a page reload show the last known phase/pct.

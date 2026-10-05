@@ -204,7 +204,7 @@ def _extract_success_payload(result):
         return None, None, None
     logs_data = result.get("logs")
     tf_state = result.get("tf_state")
-    outputs = result.get("terraform_outputs")
+    outputs = result.get("tofu_outputs")
     logs_str = (
         json.dumps(logs_data, ensure_ascii=False) if isinstance(logs_data, list)
         else logs_data if isinstance(logs_data, str)

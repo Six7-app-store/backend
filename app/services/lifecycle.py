@@ -65,7 +65,7 @@ _ALLOWED: dict[str, set[DeploymentAction]] = {
     # deployment, so that status only exists transiently (sub-second).
     "cancelled": {DeploymentAction.DELETE},
     # Paused — Resume is the obvious action; Destroy stays available so
-    # the user needn't resume first (terraform-destroy works on SHUTOFF).
+    # the user needn't resume first (tofu destroy works on SHUTOFF).
     "paused": {DeploymentAction.RESUME, DeploymentAction.DESTROY},
     # Pause failed: the deployment is still running. Allow PAUSE retry,
     # RESUME (harmless), and DESTROY.

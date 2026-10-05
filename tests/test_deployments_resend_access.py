@@ -76,7 +76,7 @@ def _seed_deployment_with_team(
         appId=app.appId,
         userId=owner.userId,
         releaseTag="v1.0.0",
-        userInputVar=json.dumps({"terraform": {}, "packer": {}}),
+        userInputVar=json.dumps({"tofu": {}}),
     )
     db.add(deployment)
     db.flush()

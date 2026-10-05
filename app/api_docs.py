@@ -41,7 +41,7 @@ OPENAPI_TAGS = [
     {
         "name": "Apps",
         "description": "App catalog: registering apps from a Git repository, their "
-        "versions and the Terraform/Packer variables a deployment asks for.",
+        "versions and the OpenTofu variables a deployment asks for.",
     },
     {
         "name": "Admin",

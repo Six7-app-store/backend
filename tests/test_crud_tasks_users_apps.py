@@ -241,12 +241,12 @@ def test_update_task_accepts_pydantic_model(db):
         },
     )
 
-    payload = TaskUpdate(status=TaskStatus.RUNNING, current_phase="terraform")
+    payload = TaskUpdate(status=TaskStatus.RUNNING, current_phase="TOFU_APPLY")
     updated = tasks_crud.update_task(db, task.taskId, payload)
 
     assert updated is not None
     assert updated.status == TaskStatus.RUNNING
-    assert updated.current_phase == "terraform"
+    assert updated.current_phase == "TOFU_APPLY"
     # progress_pct was not set on the update -> exclude_unset keeps it.
     assert updated.progress_pct is None
 

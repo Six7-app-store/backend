@@ -72,7 +72,7 @@ def _make_deployment_with_creds(
         appId=app.appId,
         userId=user.userId,
         releaseTag="v1.0.0",
-        userInputVar=json.dumps({"terraform": {}, "packer": {}}),
+        userInputVar=json.dumps({"tofu": {}}),
     )
     db.add(deployment)
     db.flush()

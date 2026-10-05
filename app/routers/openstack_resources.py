@@ -249,7 +249,7 @@ def list_keypairs(
 ):
     """
     SSH keypairs of the user. Here the identity is always the ``name``,
-    never the ID — Keystone keypairs do have IDs but Terraform modules
+    never the ID — Keystone keypairs do have IDs but OpenTofu modules
     use the name.
     """
     def fetch() -> list[dict]:
@@ -302,7 +302,7 @@ def list_floating_ip_pools(
 ):
     """
     There is no dedicated ``Pool`` resource in OpenStack — pools are
-    networks with ``router:external = true``. Terraform modules usually
+    networks with ``router:external = true``. OpenTofu modules usually
     expect the **name** of the external network.
     """
     def fetch() -> list[dict]:
