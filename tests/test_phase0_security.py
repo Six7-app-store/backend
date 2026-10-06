@@ -15,14 +15,18 @@ import pytest
 from app.main import app as fastapi_app
 from app.models import (
     App,
+    AppVersionApproval,
+    AppVersionApprovalStatus,
     Course,
     CourseTeacher,
     Deployment,
+    OpenStackAuthType,
     Task,
     TaskStatus,
     TaskType,
     Team,
     User,
+    UserOpenStackCredential,
     UserRole,
     UserToTeam,
 )
@@ -352,5 +356,96 @@ def test_team_list_is_scoped_for_students(db):
     assert {t["teamId"] for t in unfiltered.json()} == {str(mine.teamId)}
     assert foreign.status_code == 403
     assert own.status_code == 200
+
+
+# ================================================================
+# A-05 · Beim Deployen muss die gewählte Version freigegeben sein
+# ================================================================
+def _credentials(db, user):
+    from app.utils import crypto
+
+    db.add(
+        UserOpenStackCredential(
+            credentialId=uuid.uuid4(),
+            userId=user.userId,
+            auth_type=OpenStackAuthType.APPLICATION_CREDENTIAL,
+            auth_url="https://keystone.example/v3",
+            encrypted_identifier=crypto.encrypt("id"),
+            encrypted_secret=crypto.encrypt("secret"),
+        )
+    )
+    db.commit()
+
+
+def _approval(db, app, tag, status):
+    db.add(
+        AppVersionApproval(
+            approvalId=uuid.uuid4(), appId=app.appId, version_tag=tag, status=status
+        )
+    )
+    db.commit()
+
+
+@pytest.fixture
+def celery_stub():
+    class _R:
+        id = "fake-celery-id"
+
+    with patch("app.services.task_service.celery_app.send_task", return_value=_R()) as m:
+        yield m
+
+
+def _deploy(client, app, tag):
+    body = {"name": "d", "appId": str(app.appId), "userInputVar": {}, "teams": []}
+    if tag is not None:
+        body["releaseTag"] = tag
+    return client.post("/deployments/", json=body)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("tag", ["v2-pending", "v3-rejected", "v9-unbekannt", None])
+def test_non_owner_cannot_deploy_unapproved_version(db, celery_stub, tag):
+    """A-05: ``has_approved_version`` existierte, wurde aber nie aufgerufen.
+    Geprüft wurde nur, ob die App *irgendeine* freigegebene Version hat."""
+    owner = _user(db, UserRole.TEACHER)
+    teacher = _user(db, UserRole.TEACHER)
+    _credentials(db, teacher)
+    app = _app(db, owner)
+    _approval(db, app, "v1", AppVersionApprovalStatus.APPROVED)
+    _approval(db, app, "v2-pending", AppVersionApprovalStatus.PENDING)
+    _approval(db, app, "v3-rejected", AppVersionApprovalStatus.REJECTED)
+
+    with as_user(teacher) as c:
+        r = _deploy(c, app, tag)
+
+    assert r.status_code == 403, r.text
+    celery_stub.assert_not_called()
+
+
+@pytest.mark.integration
+def test_non_owner_can_deploy_approved_version(db, celery_stub):
+    owner = _user(db, UserRole.TEACHER)
+    teacher = _user(db, UserRole.TEACHER)
+    _credentials(db, teacher)
+    app = _app(db, owner)
+    _approval(db, app, "v1", AppVersionApprovalStatus.APPROVED)
+
+    with as_user(teacher) as c:
+        r = _deploy(c, app, "v1")
+
+    assert r.status_code == 201, r.text
+
+
+@pytest.mark.integration
+def test_owner_may_still_deploy_any_version(db, celery_stub):
+    """Offen im Plan (Frage 3): Besitzer bleiben vorerst unverändert."""
+    owner = _user(db, UserRole.TEACHER)
+    _credentials(db, owner)
+    app = _app(db, owner)
+
+    with as_user(owner) as c:
+        r = _deploy(c, app, "dev-branch")
+
+    assert r.status_code == 201, r.text
 
 

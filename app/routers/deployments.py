@@ -48,6 +48,7 @@ from app.utils.auth import get_current_user
 from app.utils.capabilities import (
     can_view_deployment_owner,
     ensure_create_deployment,
+    ensure_deploy_version,
     ensure_operate_deployment,
     ensure_resend_access,
     ensure_view_app,
@@ -920,6 +921,10 @@ def create_deployment(
     # the frontend receives the same shape it sees on the detail
     # endpoint when visibility is denied.
     ensure_view_app(current_user, target_app, db=db)
+
+    # Seeing the app only means SOME version is approved. The version being
+    # deployed has to be one, unless the caller owns the app or is an admin.
+    ensure_deploy_version(current_user, target_app, deployment.releaseTag, db)
 
     # Load the app author's variable declarations so we can enforce
     # per-variable contracts (``varScope``, ``fileExtensions``) below.

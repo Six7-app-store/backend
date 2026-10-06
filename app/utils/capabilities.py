@@ -162,6 +162,28 @@ def ensure_create_deployment(user: User) -> None:
         raise _forbidden("role_required", [r.value for r in STAFF_ROLES])
 
 
+def can_deploy_version(user: User, app: App, release_tag: str | None, db: Session) -> bool:
+    """Whether ``user`` may deploy ``release_tag`` of ``app``.
+
+    The owner and admins may deploy any tag (to test their own work). Everybody
+    else may deploy only a version an admin has approved: seeing an app because
+    *some* version is approved (:func:`can_view_app`) says nothing about the
+    version being asked for. No tag means nothing is approved.
+    """
+    if _is_admin(user) or _is_owner(user, app.userId):
+        return True
+    if not release_tag:
+        return False
+    return crud_approvals.has_approved_version(db, app.appId, release_tag)
+
+
+def ensure_deploy_version(
+    user: User, app: App, release_tag: str | None, db: Session
+) -> None:
+    if not can_deploy_version(user, app, release_tag, db):
+        raise _forbidden("version_not_approved")
+
+
 def can_view_deployment_member(user: User, dep: Deployment, db: Session) -> bool:
     """Member-view access to a deployment.
 
@@ -371,6 +393,8 @@ __all__ = [
     "can_approve_app_version",
     "ensure_approve_app_version",
     # Deployments
+    "can_deploy_version",
+    "ensure_deploy_version",
     "can_view_deployment_member",
     "ensure_view_deployment_member",
     "can_view_deployment_owner",
