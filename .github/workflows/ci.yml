@@ -121,12 +121,12 @@ jobs:
   # ================================================================
   # 🧪 TEST (integration) — requires Postgres
   # ================================================================
-  # Covers every test in ``tests/`` that is NOT marked ``unit``. The
-  # old separate ``api`` lane was retired together with the marker —
-  # the integration suite now exercises the FastAPI app end-to-end
-  # via ``TestClient`` (see ``tests/test_*_api.py``), and there is
-  # no longer a meaningful unit/api split below the integration
-  # bar.
+  # Covers every test that is not a unit test. ``tests/conftest.py`` gives each
+  # test without an explicit marker the lane of its directory (``tests/unit/``
+  # is ``unit``, everything else ``integration``), so no test can fall between
+  # the two lanes; ``tests/test_phase1_correctness.py`` checks that. The
+  # integration suite exercises the FastAPI app end-to-end via ``TestClient``
+  # (see ``tests/test_*_api.py``).
   test-integration:
     name: "🧪 Test (integration)"
     runs-on: ubuntu-latest
@@ -166,11 +166,10 @@ jobs:
         run: poetry install --with dev --no-root
 
       - name: Run integration tests
-        # ``|| [ $? -eq 5 ]`` swallows pytest's "no tests collected"
-        # exit code (5). With the api marker retired and integration
-        # being our broadest lane this should never trip, but the
-        # guard stays as cheap insurance against a future re-mark.
-        run: poetry run pytest -m integration -v || [ $? -eq 5 ]
+        # No "|| [ $? -eq 5 ]" here: pytest exits with 5 when nothing was
+        # collected, and that must fail the job. The guard used to turn "the
+        # lane runs zero tests" into a green build.
+        run: poetry run pytest -m integration -v
         env:
           # Nur ``DATABASE_URL`` — die Tests fallen über den
           # Conftest-Fallback automatisch darauf zurück, und es gibt

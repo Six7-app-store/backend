@@ -720,3 +720,49 @@ def test_migrations_build_the_same_schema_as_the_models():
         with admin.connect() as conn:
             conn.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
         admin.dispose()
+
+
+# ================================================================
+# B-24 · Jeder Test läuft in einer CI-Spur
+# ================================================================
+def _collect(*marker_args):
+    """Sammelt die gesamte Suite in einem eigenen Prozess und gibt die Node-IDs zurück.
+
+    Ein eigener Prozess, weil ``request.session.items`` nur die Tests enthält, die
+    der laufende Aufruf ohnehin ausgewählt hat; in CI mit ``-m unit`` wäre eine
+    Prüfung dort immer grün."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    done = subprocess.run(
+        # ``addopts`` leer: das ``-v`` aus pyproject.toml lässt ``--collect-only``
+        # sonst einen Baum statt Node-IDs ausgeben.
+        [sys.executable, "-m", "pytest", "tests", "-o", "addopts=", "--collect-only", "-q",
+         "-p", "no:cacheprovider", *marker_args],
+        cwd=root, capture_output=True, text=True, timeout=240,
+    )
+    assert done.returncode in (0, 5), done.stdout[-1500:] + done.stderr[-1500:]
+    return [line for line in done.stdout.splitlines() if "::" in line]
+
+
+@pytest.mark.integration
+def test_no_test_is_left_without_a_ci_lane():
+    """B-24: CI führt ``-m unit`` und ``-m integration`` aus. 60 von 739 Tests
+    trugen keine der beiden Marken und liefen dort nie, darunter die gesamte
+    LTI-Launch-Suite. ``conftest.py`` setzt die fehlende Marke jetzt selbst."""
+    orphans = _collect("-m", "not unit and not integration")
+
+    assert orphans == [], f"{len(orphans)} Tests ohne Spur, z. B. {orphans[:3]}"
+
+
+@pytest.mark.integration
+def test_unmarked_tests_get_their_lane_from_the_directory():
+    unit = _collect("-m", "unit")
+    integration = _collect("-m", "integration")
+
+    # ``tests/unit/test_email_service.py`` hatte als einzige Datei dort keine Marke.
+    assert any(n.startswith("tests/unit/test_email_service.py") for n in unit)
+    assert not any(n.startswith("tests/unit/") for n in integration)
+    assert any(n.startswith("tests/test_lti_launch.py") for n in integration)

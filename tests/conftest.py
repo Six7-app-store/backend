@@ -313,3 +313,22 @@ def create_app_in_db(db, user, *, name="Test App", git_link="https://github.com/
     db.commit()
     db.refresh(db_app)
     return db_app
+
+
+# ----------------------------------------------------------------
+# CI-Spuren: jeder Test gehört zu ``unit`` oder ``integration``.
+# ----------------------------------------------------------------
+def pytest_collection_modifyitems(items):
+    """Setzt die fehlende Spur-Marke selbst.
+
+    CI führt ``pytest -m unit`` und ``pytest -m integration`` aus. Ein Test ohne
+    eine der beiden Marken läuft in keiner Spur und fällt nie auf, weil er lokal
+    mitläuft: 60 von 739 Tests, darunter die gesamte LTI-Launch-Suite, wurden so
+    nie in CI ausgeführt. Ausdrücklich gesetzte Marken bleiben, alles andere
+    folgt dem Verzeichnis: ``tests/unit/`` ist ``unit``, der Rest ``integration``.
+    """
+    for item in items:
+        if item.get_closest_marker("unit") or item.get_closest_marker("integration"):
+            continue
+        lane = "unit" if item.nodeid.replace("\\", "/").startswith("tests/unit/") else "integration"
+        item.add_marker(getattr(pytest.mark, lane))
