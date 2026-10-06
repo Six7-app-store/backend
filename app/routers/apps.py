@@ -1,10 +1,10 @@
-import contextlib
 import logging
 from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.crud import app_version_approvals as crud_approvals
@@ -262,15 +262,27 @@ def create_app(
 
     # Auto-submit all tags for review if requested (public apps only)
     if app.submit_all_versions and not app.is_private and app.git_link:
+        app_id = db_app.appId  # read once: a rollback expires ``db_app``
         try:
             versions = git_service.get_versions(app.git_link)
             for v in versions:
                 tag = _version_tag(v)
-                if tag:
-                    with contextlib.suppress(Exception):
-                        crud_approvals.submit_version(db, app_id=db_app.appId, version_tag=tag)
+                if not tag:
+                    continue
+                try:
+                    crud_approvals.submit_version(db, app_id=app_id, version_tag=tag)
+                except HTTPException:
+                    pass  # 409: this version is already pending or approved
+                except SQLAlchemyError:
+                    # A failed flush or commit leaves the session unusable until
+                    # it is rolled back. Without the rollback every following
+                    # version, and the response itself, fails as well.
+                    db.rollback()
+                    logger.warning(
+                        "Could not auto-submit version %s of app %s", tag, app_id, exc_info=True
+                    )
         except Exception as e:
-            logger.warning(f"Could not auto-submit versions for app {db_app.appId}: {e}")
+            logger.warning(f"Could not auto-submit versions for app {app_id}: {e}")
 
     return _serialize_app(db_app)
 

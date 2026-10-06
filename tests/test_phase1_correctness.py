@@ -835,3 +835,62 @@ def test_deactivating_a_deleted_app_is_a_404_not_a_500(db):
         r = c.put(f"/admin/apps/{app.appId}")
 
     assert r.status_code == 404
+
+
+# ================================================================
+# B-17 · Ein Datenbankfehler beim Einreichen darf die übrigen Versionen nicht verschlucken
+# ================================================================
+@pytest.mark.integration
+def test_submit_all_versions_continues_after_a_database_error(db):
+    """B-17: ``with contextlib.suppress(Exception)`` um ``submit_version``. Nach
+    einem echten DB-Fehler bleibt die Session im Rollback-Zustand; jede weitere
+    Version scheiterte mit ``PendingRollbackError``, auch das wurde verschluckt.
+    Der Nutzer sah 201, ein Teil der Versionen war nie eingereicht."""
+    import uuid
+    from unittest.mock import patch
+
+    from app.models import AppVersionApproval, AppVersionApprovalStatus, UserRole
+    from app.routers import apps as apps_router
+    from tests.test_phase0_security import _user, as_user
+
+    owner = _user(db, UserRole.TEACHER)
+    real_submit = apps_router.crud_approvals.submit_version
+    calls = []
+
+    def flaky_submit(session, app_id, version_tag, **kwargs):
+        calls.append(version_tag)
+        if len(calls) == 1:
+            # Ein echter Datenbankfehler mitten in der Session: zweimal derselbe
+            # (appId, version_tag) verletzt ``uq_app_version_approval``.
+            for _ in range(2):
+                session.add(AppVersionApproval(
+                    approvalId=uuid.uuid4(), appId=app_id, version_tag=version_tag,
+                    status=AppVersionApprovalStatus.PENDING,
+                ))
+            session.commit()
+        return real_submit(session, app_id=app_id, version_tag=version_tag, **kwargs)
+
+    body = {
+        "name": "mit-versionen",
+        "git_link": "https://github.com/example/repo",
+        "is_private": False,
+        "submit_all_versions": True,
+    }
+    with (
+        patch.object(apps_router.git_service, "verify_repository_access",
+                     return_value={"success": True, "message": "ok"}),
+        patch.object(apps_router.git_service, "get_versions",
+                     return_value=[{"version": "v1"}, {"version": "v2"}, {"version": "v3"}]),
+        patch.object(apps_router.crud_approvals, "submit_version", flaky_submit),
+        as_user(owner) as c,
+    ):
+        r = c.post("/apps/", json=body)
+
+    assert r.status_code == 201, r.text
+    assert calls == ["v1", "v2", "v3"]
+    db.expire_all()
+    submitted = {
+        a.version_tag
+        for a in db.query(AppVersionApproval).filter(AppVersionApproval.appId == r.json()["appId"])
+    }
+    assert submitted == {"v2", "v3"}  # v1 scheiterte, die beiden anderen nicht
