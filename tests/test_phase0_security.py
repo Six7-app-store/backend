@@ -4,6 +4,7 @@ des Refactor-Plans (``REFACTOR_PLAN.md``).
 Jeder Test hier ist zuerst gegen den fehlerhaften Stand rot gelaufen. Die
 Kommentare nennen die Plan-ID (A-01 … A-07), damit man den Befund nachlesen kann.
 """
+import contextlib
 import json
 import logging
 import uuid
@@ -449,3 +450,85 @@ def test_owner_may_still_deploy_any_version(db, celery_stub):
     assert r.status_code == 201, r.text
 
 
+# ================================================================
+# A-01 · Das Plattform-Token geht nur an erlaubte Git-Hosts
+# ================================================================
+class _FakeSession:
+    def __init__(self):
+        self.calls = []
+
+    def get(self, url, headers=None, timeout=None):
+        self.calls.append((url, dict(headers or {})))
+
+        class _R:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return []
+
+        return _R()
+
+
+def _service():
+    from app.services.git_service import GitService
+
+    svc = GitService.__new__(GitService)
+    svc.token = "PLATFORM-TOKEN"
+    svc._session = _FakeSession()
+    return svc
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://gitlab.attacker-example.invalid/o/r",
+        "https://evilgithub.com/o/r",
+        "https://github.com.evil.example/o/r",
+        "git@gitlab.evil.example:o/r.git",
+    ],
+)
+def test_token_is_never_sent_to_unlisted_host(url):
+    """A-01: Ein Host galt als GitLab, sobald „gitlab" im Namen stand, und
+    bekam das Plattform-Token im Header ``PRIVATE-TOKEN``."""
+    svc = _service()
+
+    result = svc.verify_repository_access(url)
+    with contextlib.suppress(Exception):
+        svc.get_versions(url)
+
+    assert result["success"] is False
+    assert svc._session.calls == []
+
+
+@pytest.mark.unit
+def test_token_is_sent_to_allowed_gitlab_host():
+    svc = _service()
+
+    svc.verify_repository_access("https://gitlab.com/owner/repo.git")
+
+    (url, headers), = svc._session.calls
+    assert url.startswith("https://gitlab.com/api/v4/")
+    assert headers == {"PRIVATE-TOKEN": "PLATFORM-TOKEN"}
+
+
+@pytest.mark.unit
+def test_configured_self_hosted_gitlab_is_allowed():
+    svc = _service()
+
+    with patch("app.services.git_service.settings.GIT_ALLOWED_HOSTS", ["gitlab.dhbw.example"]):
+        svc.verify_repository_access("https://gitlab.dhbw.example/owner/repo.git")
+
+    (url, headers), = svc._session.calls
+    assert url.startswith("https://gitlab.dhbw.example/api/v4/")
+
+
+@pytest.mark.unit
+def test_clone_url_carries_no_token_for_unlisted_host():
+    svc = _service()
+
+    with pytest.raises(ValueError):
+        svc._get_authenticated_url("https://gitlab.attacker-example.invalid/o/r.git")

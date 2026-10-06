@@ -13,6 +13,12 @@ class Settings(BaseSettings):
     # Git
     TEMP_REPO_BASE_PATH: str = "/tmp/worker_repos"
     GIT_ACCESS_TOKEN: str = ""  # Token for HTTPS git authentication
+    # Hosts the platform token may be sent to (and apps may live on). Anything
+    # else is refused: the token is never attached to a host that is not
+    # listed. ``github.com`` is always GitHub, every other entry is treated as
+    # a GitLab instance. A self-hosted GitLab has to be added here, e.g.
+    # GIT_ALLOWED_HOSTS='["github.com","gitlab.com","gitlab.example.edu"]'
+    GIT_ALLOWED_HOSTS: list[str] = ["github.com", "gitlab.com"]
 
     # Keycloak — single source of truth for authentication
     KEYCLOAK_SERVER_URL: str = "http://keycloak:8080"

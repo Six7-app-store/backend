@@ -58,6 +58,36 @@ def _assert_safe_git_url(git_url: str) -> None:
         )
 
 
+def _allowed_hosts() -> set[str]:
+    """Lower-cased hosts the platform token may be sent to."""
+    return {h.strip().lower() for h in settings.GIT_ALLOWED_HOSTS if h.strip()}
+
+
+def _host_of(git_url: str) -> str:
+    """Hostname of an https/http/``git@`` URL, lower-cased ('' if unparseable)."""
+    parsed = urlparse(
+        git_url
+        if "://" in git_url
+        else f"https://{git_url.replace(':', '/', 1).replace('git@', '')}"
+    )
+    return (parsed.hostname or "").lower()
+
+
+def _platform_of(host: str) -> str:
+    """``github`` for github.com, ``gitlab`` for any other allowed host, else ``unknown``.
+
+    Decided by an exact match against ``GIT_ALLOWED_HOSTS`` — never by a
+    substring of the name, which let ``gitlab.attacker.example`` pass for GitLab
+    and receive the platform token.
+    """
+    host = host.lower()
+    if host == "github.com":
+        return "github"
+    if host in _allowed_hosts():
+        return "gitlab"
+    return "unknown"
+
+
 class GitService:
     """Service for Git operations and release management."""
 
@@ -94,6 +124,12 @@ class GitService:
     def _get_authenticated_url(self, git_url: str) -> str:
         """Convert Git URL to HTTPS format with token authentication."""
         _assert_safe_git_url(git_url)
+        host = _host_of(git_url)
+        if _platform_of(host) == "unknown":
+            raise ValueError(
+                f"git_link host {host!r} is not in GIT_ALLOWED_HOSTS; "
+                "refusing to inject credentials"
+            )
         url = git_url
         if url.startswith('git@'):
             url = url.replace('git@', '').replace(':', '/', 1)
@@ -118,7 +154,7 @@ class GitService:
             match = re.match(pattern, git_url)
             if match:
                 host, owner, repo = match.groups()
-                platform = 'github' if 'github' in host.lower() else 'gitlab' if 'gitlab' in host.lower() else 'unknown'
+                platform = _platform_of(host)
                 return {'host': host, 'owner': owner, 'repo': repo, 'platform': platform}
 
         logger.warning(f"Could not parse git URL: {git_url}")
@@ -326,7 +362,10 @@ class GitService:
             if not parsed or parsed['platform'] == 'unknown':
                 return {
                     'success': False,
-                    'message': f"Unable to parse repository URL or unsupported platform. Supported: GitHub, GitLab. URL: {git_url}"
+                    'message': (
+                        "Unable to parse repository URL or unsupported platform. "
+                        f"Allowed hosts: {', '.join(sorted(_allowed_hosts()))}. URL: {git_url}"
+                    )
                 }
 
             if not self.token:
