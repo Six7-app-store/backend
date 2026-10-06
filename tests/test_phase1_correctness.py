@@ -137,3 +137,69 @@ def test_task_list_survives_a_task_without_celery_id(db):
 
     assert r.status_code == 200, r.text
     assert r.json()[0]["celeryTaskId"] is None
+
+
+# ================================================================
+# B-04 · Der Statusfilter muss denselben Status meinen wie die Anzeige
+# ================================================================
+def _deployment_with_last_task(db, owner, task_type, task_status, *, created_at=None):
+    import datetime as dt
+    import uuid
+
+    from app.models import Task
+    from tests.test_phase0_security import _app, _deployment
+
+    dep = _deployment(db, owner, _app(db, owner))
+    db.add(Task(
+        taskId=uuid.uuid4(),
+        deploymentId=dep.deploymentId,
+        celeryTaskId="c",
+        type=task_type,
+        status=task_status,
+        created_at=created_at or dt.datetime(2026, 1, 1, 12, 0, 0),
+    ))
+    db.commit()
+    return dep
+
+
+@pytest.mark.integration
+def test_status_filter_matches_the_displayed_status_for_every_task_state(db):
+    """B-04: ``derive_status`` kennt ``paused``, ``pausing``, ``resuming``,
+    ``pause_failed`` und ``resume_failed``, der Filter nicht. ``?status=paused``
+    fand nichts, ``?status=success`` dafür auch pausierte Deployments.
+
+    Geprüft wird jede Kombination aus Task-Typ und -Status gegen die Anzeige."""
+    from app.crud import deployments as crud
+    from app.models import TaskStatus, TaskType, UserRole
+    from tests.test_phase0_security import _user
+
+    owner = _user(db, UserRole.TEACHER)
+    shown = {}
+    for task_type in TaskType:
+        for task_status in TaskStatus:
+            dep = _deployment_with_last_task(db, owner, task_type, task_status)
+            shown[dep.deploymentId] = crud.derive_status(task_status, task_type)
+
+    for wanted in crud.DEPLOYMENT_STATUSES:
+        found = {d.deploymentId for d in crud.get_deployments(db, status=wanted, limit=500)}
+        expected = {i for i, s in shown.items() if s == wanted}
+        assert found == expected, f"status={wanted}"
+
+    # Jeder angezeigte Status ist auch filterbar.
+    assert set(shown.values()) <= set(crud.DEPLOYMENT_STATUSES)
+
+
+@pytest.mark.integration
+def test_status_filter_rejects_an_unknown_status(db):
+    from app.models import UserRole
+    from tests.test_phase0_security import _user, as_user
+
+    owner = _user(db, UserRole.TEACHER)
+
+    with as_user(owner) as c:
+        bad = c.get("/deployments/", params={"status_filter": "no-such-status"})
+        good = c.get("/deployments/", params={"status_filter": "paused"})
+
+    assert bad.status_code == 422
+    assert "paused" in bad.text  # nennt die erlaubten Werte
+    assert good.status_code == 200

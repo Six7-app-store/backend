@@ -195,6 +195,15 @@ def list_deployments(
     parameter is ignored, not rejected, to keep the API forgiving
     against query-string-builder bugs in the frontend).
     """
+    if status_filter is not None and status_filter not in crud_deployments.DEPLOYMENT_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "reason": "unknown_status",
+                "allowed": list(crud_deployments.DEPLOYMENT_STATUSES),
+            },
+        )
+
     is_staff = current_user.role in (UserRole.TEACHER, UserRole.ADMIN)
     use_course_scope = is_staff and scope == "course"
 

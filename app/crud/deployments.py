@@ -161,6 +161,62 @@ def derive_status(
     return raw_status
 
 
+# Every value ``derive_status`` can return. ``?status=`` accepts exactly these.
+DEPLOYMENT_STATUSES: tuple[str, ...] = (
+    "pending",
+    "running",
+    "success",
+    "failed",
+    "cancelled",
+    "destroying",
+    "destroyed",
+    "pausing",
+    "paused",
+    "resuming",
+    "pause_failed",
+    "resume_failed",
+)
+
+
+def _status_predicate(latest, status: str):
+    """SQL twin of :func:`derive_status` for one effective ``status``.
+
+    ``latest`` is the window subquery carrying the latest task's ``type`` and
+    ``status``. Every branch below is the inverse of one branch in
+    ``derive_status``; ``tests/test_phase1_correctness.py`` checks the two
+    against each other for every ``(type, status)`` pair, so they cannot drift
+    apart silently.
+    """
+    kind, state = latest.c.type, latest.c.status
+    in_flight = state.in_((TaskStatus.PENDING, TaskStatus.RUNNING))
+    if status == "destroying":
+        return and_(kind == TaskType.DESTROY, in_flight)
+    if status == "destroyed":
+        return and_(kind == TaskType.DESTROY, state == TaskStatus.SUCCESS)
+    if status == "pausing":
+        return and_(kind == TaskType.PAUSE, in_flight)
+    if status == "paused":
+        return and_(kind == TaskType.PAUSE, state == TaskStatus.SUCCESS)
+    if status == "pause_failed":
+        return and_(kind == TaskType.PAUSE, state == TaskStatus.FAILED)
+    if status == "resuming":
+        return and_(kind == TaskType.RESUME, in_flight)
+    if status == "resume_failed":
+        return and_(kind == TaskType.RESUME, state == TaskStatus.FAILED)
+    if status == "cancelled":
+        return state == TaskStatus.CANCELLED
+    # The plain statuses: a task type that has its own synthetic status never
+    # shows the raw one (a finished pause is "paused", not "success").
+    raw = TaskStatus(status)
+    shadowed = {
+        TaskStatus.PENDING: (TaskType.DESTROY, TaskType.PAUSE, TaskType.RESUME),
+        TaskStatus.RUNNING: (TaskType.DESTROY, TaskType.PAUSE, TaskType.RESUME),
+        TaskStatus.SUCCESS: (TaskType.DESTROY, TaskType.PAUSE),
+        TaskStatus.FAILED: (TaskType.PAUSE, TaskType.RESUME),
+    }[raw]
+    return and_(state == raw, kind.notin_(shadowed))
+
+
 def get_deployment_status(db: Session, deployment_id: UUID) -> str | None:
     """Effective deployment status for a single deployment.
 
@@ -417,8 +473,11 @@ def get_deployments(
     # LATEST task per deployment (see ``derive_status``), so we join a
     # window-function subquery pinning the latest task and apply the
     # equivalent predicate here — before offset/limit — so the page size
-    # stays correct.
+    # stays correct. The window only looks at tasks of deployments that
+    # survived the filters above, not at every task in the table.
     if status:
+        if status not in DEPLOYMENT_STATUSES:
+            return []
         latest_rn = (
             func.row_number()
             .over(partition_by=Task.deploymentId, order_by=desc(Task.created_at))
@@ -430,7 +489,9 @@ def get_deployments(
                 Task.status.label("status"),
                 Task.type.label("type"),
                 latest_rn,
-            ).subquery()
+            )
+            .filter(Task.deploymentId.in_(query.with_entities(Deployment.deploymentId)))
+            .subquery()
         )
         query = query.join(
             latest_subq,
@@ -438,35 +499,7 @@ def get_deployments(
                 latest_subq.c.did == Deployment.deploymentId,
                 latest_subq.c.rn == 1,
             ),
-        )
-
-        if status == "destroying":
-            query = query.filter(
-                latest_subq.c.type == TaskType.DESTROY,
-                latest_subq.c.status.in_((TaskStatus.PENDING, TaskStatus.RUNNING)),
-            )
-        elif status == "destroyed":
-            query = query.filter(
-                latest_subq.c.type == TaskType.DESTROY,
-                latest_subq.c.status == TaskStatus.SUCCESS,
-            )
-        else:
-            # Plain task statuses, mirroring ``derive_status``:
-            # - ``pending``/``running``/``success`` match deploy-typed
-            #   tasks only (destroy surfaces as destroying/destroyed).
-            # - ``failed``/``cancelled`` bleed through both task types.
-            try:
-                status_enum = TaskStatus(status)
-            except ValueError:
-                # Unknown status string → empty result.
-                return []
-            query = query.filter(latest_subq.c.status == status_enum)
-            if status_enum in (
-                TaskStatus.PENDING,
-                TaskStatus.RUNNING,
-                TaskStatus.SUCCESS,
-            ):
-                query = query.filter(latest_subq.c.type != TaskType.DESTROY)
+        ).filter(_status_predicate(latest_subq, status))
 
     # Order by deploymentId (UUID)
     query = query.order_by(desc(Deployment.deploymentId))
