@@ -21,8 +21,10 @@ from app.models import (
     Task,
     TaskStatus,
     TaskType,
+    Team,
     User,
     UserRole,
+    UserToTeam,
 )
 from tests.conftest import _make_client
 
@@ -292,5 +294,63 @@ def test_user_search_does_not_demote_and_survives_unverified_email(db):
     assert r.status_code == 200, r.text
     db.expire_all()
     assert db.get(User, known.userId).role == UserRole.TEACHER
+
+
+# ================================================================
+# A-07 · /teams prüft den Zugriff auf das zugehörige Deployment
+# ================================================================
+def _team(db, deployment, name="T1", members=()):
+    t = Team(teamId=uuid.uuid4(), name=name, deploymentId=deployment.deploymentId)
+    db.add(t)
+    db.commit()
+    for m in members:
+        db.add(UserToTeam(userId=m.userId, teamId=t.teamId))
+    db.commit()
+    db.refresh(t)
+    return t
+
+
+@pytest.mark.integration
+def test_team_detail_denied_to_unrelated_student(db):
+    """A-07: ``get_team`` ignorierte ``current_user``: jeder angemeldete Nutzer
+    sah jedes Team samt Deployment-ID."""
+    owner = _user(db, UserRole.TEACHER)
+    dep = _deployment(db, owner, _app(db, owner))
+    team = _team(db, dep)
+    stranger = _user(db, UserRole.STUDENT)
+
+    with as_user(stranger) as c:
+        assert c.get(f"/teams/{team.teamId}").status_code == 403
+
+
+@pytest.mark.integration
+def test_team_detail_allowed_to_team_member(db):
+    owner = _user(db, UserRole.TEACHER)
+    dep = _deployment(db, owner, _app(db, owner))
+    member = _user(db, UserRole.STUDENT)
+    team = _team(db, dep, members=[member])
+
+    with as_user(member) as c:
+        assert c.get(f"/teams/{team.teamId}").status_code == 200
+
+
+@pytest.mark.integration
+def test_team_list_is_scoped_for_students(db):
+    owner = _user(db, UserRole.TEACHER)
+    dep_a = _deployment(db, owner, _app(db, owner))
+    dep_b = _deployment(db, owner, _app(db, owner))
+    member = _user(db, UserRole.STUDENT)
+    mine = _team(db, dep_a, "mine", members=[member])
+    _team(db, dep_b, "foreign")
+
+    with as_user(member) as c:
+        unfiltered = c.get("/teams/")
+        foreign = c.get("/teams/", params={"deployment_id": str(dep_b.deploymentId)})
+        own = c.get("/teams/", params={"deployment_id": str(dep_a.deploymentId)})
+
+    assert unfiltered.status_code == 200
+    assert {t["teamId"] for t in unfiltered.json()} == {str(mine.teamId)}
+    assert foreign.status_code == 403
+    assert own.status_code == 200
 
 

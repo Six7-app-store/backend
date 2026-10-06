@@ -3,11 +3,16 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.crud import deployments as crud_deployments
 from app.crud import teams as crud_teams
 from app.database import get_db
 from app.models import User
 from app.schemas import TeamCreate, TeamResponse, TeamUpdate, TeamWithMembers
 from app.utils.auth import get_current_user
+from app.utils.capabilities import (
+    can_view_deployment_owner,
+    ensure_view_deployment_member,
+)
 from app.utils.permissions import require_staff
 
 router = APIRouter()
@@ -25,13 +30,29 @@ def list_teams(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Get all teams, optionally filtered to a single deployment.
+    List the teams the caller is allowed to see, optionally for one deployment.
 
-    All authenticated users may list teams; per-team membership gating
-    happens at ``GET /teams/{team_id}``.
+    Same split as ``GET /deployments/{id}``: the owner view (owner, admin,
+    course-teacher of the owner's course) sees every team of a deployment, every
+    other caller only the teams they belong to. Naming a deployment the caller
+    has no access to at all is a 403. Without ``deployment_id`` the caller gets
+    their own teams plus the teams of deployments they own; admins get all.
     """
-    teams = crud_teams.get_teams(db, skip=skip, limit=limit, deployment_id=deployment_id)
-    return teams
+    if deployment_id is None:
+        return crud_teams.get_teams_visible_to(db, current_user, skip=skip, limit=limit)
+
+    deployment = crud_deployments.get_deployment(db, deployment_id)
+    if not deployment:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Deployment not found"
+        )
+    ensure_view_deployment_member(current_user, deployment, db)
+    if can_view_deployment_owner(current_user, deployment, db):
+        return crud_teams.get_teams(db, skip=skip, limit=limit, deployment_id=deployment_id)
+    return crud_teams.get_teams_for_member(
+        db, current_user.userId, deployment_id, skip=skip, limit=limit
+    )
 
 
 # ----------------------------------------------------------------
@@ -43,12 +64,29 @@ def get_team(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Get team by ID with all members"""
+    """Get team by ID with all members.
+
+    Owner view of the team's deployment (owner, admin, course-teacher) or a
+    member of this very team; everyone else gets a 403.
+    """
     team = crud_teams.get_team(db, team_id)
     if not team:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Team not found"
+        )
+    deployment = crud_deployments.get_deployment(db, team.deploymentId)
+    if not deployment:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Team not found"
+        )
+    if not can_view_deployment_owner(current_user, deployment, db) and not (
+        crud_teams.is_team_member(db, team.teamId, current_user.userId)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "team_view_forbidden"},
         )
     return team
 

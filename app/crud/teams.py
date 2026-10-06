@@ -1,8 +1,9 @@
 from uuid import UUID
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from app.models import Team, UserToTeam
+from app.models import Deployment, Team, User, UserRole, UserToTeam
 from app.schemas import TeamCreate, TeamUpdate
 
 
@@ -24,6 +25,57 @@ def get_teams(
         query = query.filter(Team.deploymentId == deployment_id)
 
     return query.offset(skip).limit(limit).all()
+
+
+def is_team_member(db: Session, team_id: UUID, user_id: UUID) -> bool:
+    """Whether ``user_id`` belongs to ``team_id`` (a ``UserToTeam`` row exists)."""
+    return (
+        db.query(UserToTeam.userToTeamId)
+        .filter(UserToTeam.teamId == team_id, UserToTeam.userId == user_id)
+        .first()
+        is not None
+    )
+
+
+def get_teams_for_member(
+    db: Session,
+    user_id: UUID,
+    deployment_id: UUID,
+    skip: int = 0,
+    limit: int = 100,
+) -> list[Team]:
+    """Teams of one deployment that ``user_id`` is a member of."""
+    return (
+        db.query(Team)
+        .join(UserToTeam, UserToTeam.teamId == Team.teamId)
+        .filter(Team.deploymentId == deployment_id, UserToTeam.userId == user_id)
+        .order_by(Team.name, Team.teamId)
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+
+def get_teams_visible_to(
+    db: Session, user: User, skip: int = 0, limit: int = 100
+) -> list[Team]:
+    """Teams a caller may list without naming a deployment.
+
+    Admins see every team of every live deployment. Everybody else sees the
+    teams they belong to plus all teams of the deployments they own — the same
+    split ``GET /deployments/{id}`` makes between owner view and member view.
+    """
+    query = (
+        db.query(Team)
+        .join(Deployment, Deployment.deploymentId == Team.deploymentId)
+        .filter(Deployment.deleted_at.is_(None))
+    )
+    if user.role != UserRole.ADMIN:
+        member_team_ids = db.query(UserToTeam.teamId).filter(UserToTeam.userId == user.userId)
+        query = query.filter(
+            or_(Deployment.userId == user.userId, Team.teamId.in_(member_team_ids))
+        )
+    return query.order_by(Team.name, Team.teamId).offset(skip).limit(limit).all()
 
 
 def _add_team_members(db: Session, team: Team, user_ids: list[UUID]) -> None:

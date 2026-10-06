@@ -201,11 +201,9 @@ def test_get_team_member_ok(db, mock_user, mock_student):
 
 @pytest.mark.integration
 def test_get_team_non_member_403(db, mock_user, mock_student):
-    """Nicht-Mitglied: Router gewährt aktuell jedem Auth-User Lesezugriff
-    (es gibt keinen Membership-Check), aber ein nicht existierendes Team
-    liefert 404. Dieser Test bildet das real beobachtbare Verhalten ab:
-    ein zufälliges, fremdes Team liefert für den Nicht-Member 200, und
-    eine fehlende ID liefert 404 — kein 403."""
+    """Nicht-Mitglied: ein fremdes Team liefert 403 (Phase 0, A-07 — vorher
+    las ``get_team`` ohne jede Prüfung und lieferte 200), eine fehlende ID
+    weiterhin 404."""
     dep = _make_deployment(db, mock_user)
     team = _make_team(db, name="NonMemberTeam", deployment=dep)
 
@@ -213,8 +211,7 @@ def test_get_team_non_member_403(db, mock_user, mock_student):
         with _override(mock_student) as client:
             response_existing = client.get(f"/teams/{team.teamId}")
             response_missing = client.get(f"/teams/{uuid.uuid4()}")
-        # Heutiges Verhalten dokumentieren — kein 403, sondern 200/404.
-        assert response_existing.status_code == 200
+        assert response_existing.status_code == 403
         assert response_missing.status_code == 404
     finally:
         fastapi_app.dependency_overrides.clear()
