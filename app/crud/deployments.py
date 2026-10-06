@@ -429,6 +429,7 @@ def get_deployments(
     app_id: UUID | None = None,
     status: str | None = None,
     include_deleted: bool = False,
+    owner_ids: list[UUID] | None = None,
 ) -> list[Deployment]:
     """Get deployments with optional filters. Hides soft-deleted by default.
 
@@ -439,6 +440,10 @@ def get_deployments(
     ``UserToTeam`` row OR has a direct ``UserToDeployment`` mapping.
     Mutually exclusive with ``user_id``; if both are set ``user_id``
     wins.
+
+    ``owner_ids`` keeps deployments owned by any of the given users (the
+    course-scope listing). It combines with every other filter, so ``status``,
+    ``app_id`` and the paging apply to it as well.
     """
     query = db.query(Deployment)
 
@@ -466,6 +471,8 @@ def get_deployments(
             | (Deployment.deploymentId.in_(member_deployment_ids_via_teams))
             | (Deployment.deploymentId.in_(member_deployment_ids_direct))
         )
+    if owner_ids is not None:
+        query = query.filter(Deployment.userId.in_(owner_ids))
     if app_id:
         query = query.filter(Deployment.appId == app_id)
 

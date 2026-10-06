@@ -310,3 +310,54 @@ def test_other_lists_have_a_defined_order(db):
     assert [t.celeryTaskId for t in crud_tasks.get_tasks(db, deployment_id=dep.deploymentId)] == [
         f"t{d}" for d in sorted(days)
     ]
+
+
+# ================================================================
+# B-14 · ?scope=course respektiert die anderen Filter
+# ================================================================
+@pytest.mark.integration
+def test_course_scope_listing_applies_the_status_filter(db):
+    """B-14: ``status_filter`` wurde angenommen und im Kurs-Scope still
+    ignoriert (ein Kommentar im Code nannte das Absicht)."""
+    from app.models import TaskStatus, TaskType, UserRole
+    from tests.test_phase0_security import _course, _teach, _user, as_user
+
+    course, other_course = _course(db), _course(db)
+    teacher = _user(db, UserRole.TEACHER)
+    _teach(db, course, teacher)
+    ok_student = _user(db, UserRole.STUDENT, course=course)
+    bad_student = _user(db, UserRole.STUDENT, course=course)
+    outsider = _user(db, UserRole.STUDENT, course=other_course)
+
+    ok = _deployment_with_last_task(db, ok_student, TaskType.DEPLOY, TaskStatus.SUCCESS)
+    bad = _deployment_with_last_task(db, bad_student, TaskType.DEPLOY, TaskStatus.FAILED)
+    _deployment_with_last_task(db, outsider, TaskType.DEPLOY, TaskStatus.FAILED)
+
+    with as_user(teacher) as c:
+        failed = c.get("/deployments/", params={"scope": "course", "status_filter": "failed"})
+        everything = c.get("/deployments/", params={"scope": "course"})
+        one_student = c.get(
+            "/deployments/", params={"scope": "course", "student": str(ok_student.userId)}
+        )
+
+    assert {d["deploymentId"] for d in failed.json()} == {str(bad.deploymentId)}
+    assert {d["deploymentId"] for d in everything.json()} == {
+        str(ok.deploymentId), str(bad.deploymentId),
+    }
+    assert {d["deploymentId"] for d in one_student.json()} == {str(ok.deploymentId)}
+
+
+@pytest.mark.integration
+def test_course_scope_listing_is_empty_for_a_teacher_without_courses(db):
+    from app.models import TaskStatus, TaskType, UserRole
+    from tests.test_phase0_security import _course, _user, as_user
+
+    teacher = _user(db, UserRole.TEACHER)
+    student = _user(db, UserRole.STUDENT, course=_course(db))
+    _deployment_with_last_task(db, student, TaskType.DEPLOY, TaskStatus.SUCCESS)
+
+    with as_user(teacher) as c:
+        r = c.get("/deployments/", params={"scope": "course"})
+
+    assert r.status_code == 200
+    assert r.json() == []

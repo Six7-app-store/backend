@@ -20,8 +20,8 @@ from app.crud import openstack_credentials as crud_openstack_credentials
 from app.crud import teams as crud_teams
 from app.crud import users as crud_users
 from app.database import get_db
-from app.models import Deployment, TaskStatus, TaskType, User, UserRole
 from app.models import Task as TaskModel  # for ad-hoc state queries
+from app.models import TaskStatus, TaskType, User, UserRole
 from app.schemas import (
     DeploymentCreate,
     DeploymentDetail,
@@ -81,42 +81,25 @@ def _list_course_scope_deployments(
     runs the shared enrichment loop over the result.
     """
     my_courses = get_my_course_teacher_ids(current_user, db)
-    if current_user.role == UserRole.ADMIN:
-        # Admins always see everything inside the chosen scope.
-        # We still need the course-id filter to make ``?scope=course``
-        # narrow the listing in some way — otherwise the param is a
-        # no-op for admins. The implementation: pull every course
-        # the admin is registered as course-teacher for (typically
-        # empty), and fall back to the union with the explicit
-        # ``student`` filter so the route still does something
-        # useful in the common case of an admin requesting a
-        # specific student's deployments via the profile page.
-        pass
     if not my_courses and current_user.role != UserRole.ADMIN:
-        # Teacher with no course-teacher rows — the course scope
-        # is empty by definition. Return an empty page rather
-        # than the teacher's own owned set, because that would
-        # mask the absence of any teacher-course assignment.
+        # Teacher with no course-teacher rows — the course scope is empty by
+        # definition. Return an empty page rather than the teacher's own owned
+        # set, because that would mask the absence of any teacher-course
+        # assignment.
         return []
 
-    # Resolve the set of candidate student userIds: every user
-    # whose ``courseId`` falls inside ``my_courses``. When the
-    # caller also passed ``?student=<id>``, narrow to that single
-    # user IFF they actually sit inside one of those courses.
-    student_q = db.query(User.userId).filter(
-        User.courseId.in_(my_courses)
-    )
+    # Every user whose ``courseId`` falls inside ``my_courses``. With
+    # ``?student=<id>`` only that user, and only if they sit in one of those
+    # courses; otherwise the caller would learn that the student exists.
+    student_q = db.query(User.userId).filter(User.courseId.in_(my_courses))
     if student is not None:
-        # ``?student=<id>``: require the student to be inside one
-        # of the teacher's courses; otherwise we'd leak that
-        # ``student`` exists at all to a teacher who can't see them.
         student_q = student_q.filter(User.userId == student)
     owner_ids = [row[0] for row in student_q.all()]
 
-    if current_user.role == UserRole.ADMIN and not owner_ids:
-        # Admin path with empty course set + no student filter →
-        # show the admin's own owned set instead of an empty page.
-        if student is None:
+    if not owner_ids:
+        if current_user.role == UserRole.ADMIN and student is None:
+            # An admin without taught courses gets their own deployments
+            # rather than an empty page.
             return crud_deployments.get_deployments(
                 db,
                 skip=skip,
@@ -125,32 +108,18 @@ def _list_course_scope_deployments(
                 app_id=app_id,
                 status=status_filter,
             )
-        return []
-    if not owner_ids:
-        # Teacher in scope mode but their courses are empty, or
-        # the named ``student`` isn't in any of their courses —
-        # empty page, no leak about that student's existence.
+        # A teacher whose courses are empty, or a ``student`` outside them:
+        # an empty page, no leak about that student's existence.
         return []
 
-    # We can't easily widen the existing get_deployments
-    # signature to accept an owner_id IN clause without
-    # disturbing the other branches, so we build the query
-    # inline here. Same soft-delete + app_id + status
-    # semantics as the helper.
-    q = db.query(Deployment).filter(Deployment.deleted_at.is_(None))
-    q = q.filter(Deployment.userId.in_(owner_ids))
-    if app_id:
-        q = q.filter(Deployment.appId == app_id)
-    # Reuse the helper's status-filter implementation by
-    # forwarding to ``get_deployments`` with a synthetic
-    # ``user_id`` of None and a post-filter — but the helper
-    # short-circuits on user_id, so simplest is to inline the
-    # ordering/pagination and skip the status filter here. A
-    # course-teacher list view rarely needs status filtering
-    # in the index; the per-deployment detail page handles
-    # status-specific UX.
-    q = q.order_by(desc(Deployment.deploymentId))
-    return q.offset(skip).limit(limit).all()
+    return crud_deployments.get_deployments(
+        db,
+        skip=skip,
+        limit=limit,
+        owner_ids=owner_ids,
+        app_id=app_id,
+        status=status_filter,
+    )
 
 
 # ----------------------------------------------------------------
