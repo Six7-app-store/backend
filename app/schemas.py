@@ -487,7 +487,9 @@ class DeploymentResourceListResponse(BaseModel):
 # ----------------------------------------------------------------
 class TaskBase(BaseModel):
     deploymentId: UUID
-    celeryTaskId: str
+    # Empty until the task has been handed to Celery (``prepare_task_in_tx``
+    # inserts the row first), and for a task the reconciler gave up on.
+    celeryTaskId: str | None = None
     type: TaskType
     status: TaskStatus
     started_at: datetime | None = None

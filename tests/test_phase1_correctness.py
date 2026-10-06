@@ -106,3 +106,34 @@ def test_app_create_still_rejects_private_hosts():
 
     with patch("socket.gethostbyname", return_value="10.0.0.5"), pytest.raises(ValidationError):
         AppCreate(name="a", git_link="https://git.example.org/o/r")
+
+
+# ================================================================
+# B-03 · Ein Task ohne Celery-ID ist ein gültiger Zustand
+# ================================================================
+@pytest.mark.integration
+def test_task_list_survives_a_task_without_celery_id(db):
+    """B-03: ``Task.celeryTaskId`` ist nullable und bleibt bis zum Versand leer
+    (``prepare_task_in_tx``), ``TaskResponse`` verlangte aber einen String. Die
+    Task-Liste antwortete in diesem Zeitfenster mit 500."""
+    import uuid
+
+    from app.models import Task, TaskStatus, TaskType, UserRole
+    from tests.test_phase0_security import _app, _deployment, _user, as_user
+
+    owner = _user(db, UserRole.TEACHER)
+    dep = _deployment(db, owner, _app(db, owner))
+    db.add(Task(
+        taskId=uuid.uuid4(),
+        deploymentId=dep.deploymentId,
+        celeryTaskId=None,
+        type=TaskType.DEPLOY,
+        status=TaskStatus.PENDING,
+    ))
+    db.commit()
+
+    with as_user(owner) as c:
+        r = c.get(f"/tasks/deployment/{dep.deploymentId}")
+
+    assert r.status_code == 200, r.text
+    assert r.json()[0]["celeryTaskId"] is None
