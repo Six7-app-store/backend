@@ -430,13 +430,15 @@ def _handle_task_failed(celery_task_id: str, event: dict) -> tuple[dict, str | N
             # build, etc.).
             failure_kind = "worker_failure"
             _apply_structured_failure(update_data, failure_data)
-            logger.info(f"[FAILED] Extracted structured failure data for {celery_task_id}: {update_data}")
+            # Never log ``update_data`` here: it carries ``tf_state`` and
+            # ``outputs``, i.e. the passwords of the provisioned machines.
+            logger.info("[FAILED] Extracted structured failure data for %s", celery_task_id)
         else:
             raise ValueError("Not structured failure format")
     except Exception as parse_error:
         logger.warning(f"Could not parse structured failure: {parse_error}")
         failure_kind = _apply_infra_failure(update_data, exception_type, traceback)
-    logger.info(f"[FAILED] Update data for {celery_task_id}: {update_data}")
+    logger.info("[FAILED] Task %s marked failed (kind=%s)", celery_task_id, failure_kind)
     return update_data, failure_kind
 
 
