@@ -133,3 +133,50 @@ def test_failed_task_does_not_log_state_or_outputs(caplog):
     assert SECRET not in caplog.text
 
 
+# ================================================================
+# A-03 · /tasks folgt demselben Rechtemodell wie /deployments
+# ================================================================
+@pytest.mark.integration
+def test_tasks_denied_to_teacher_without_course_link(db):
+    """A-03: Eine Lehrkraft ohne Kursbezug zum Besitzer sah über /tasks
+    ``tf_state`` und ``outputs`` jedes Deployments."""
+    owner = _user(db, UserRole.STUDENT)
+    teacher = _user(db, UserRole.TEACHER)
+    dep = _deployment(db, owner, _app(db, owner))
+    task = _task_with_secret(db, dep)
+
+    with as_user(teacher) as c:
+        by_deployment = c.get(f"/tasks/deployment/{dep.deploymentId}")
+        by_id = c.get(f"/tasks/{task.taskId}")
+
+    assert by_deployment.status_code == 403
+    assert by_id.status_code == 403
+    assert SECRET not in by_deployment.text + by_id.text
+
+
+@pytest.mark.integration
+def test_tasks_allowed_to_course_teacher_of_owner(db):
+    course = _course(db)
+    owner = _user(db, UserRole.STUDENT, course=course)
+    teacher = _user(db, UserRole.TEACHER)
+    _teach(db, course, teacher)
+    dep = _deployment(db, owner, _app(db, owner))
+    task = _task_with_secret(db, dep)
+
+    with as_user(teacher) as c:
+        assert c.get(f"/tasks/deployment/{dep.deploymentId}").status_code == 200
+        assert c.get(f"/tasks/{task.taskId}").status_code == 200
+
+
+@pytest.mark.integration
+def test_tasks_allowed_to_admin(db):
+    owner = _user(db, UserRole.STUDENT)
+    admin = _user(db, UserRole.ADMIN)
+    dep = _deployment(db, owner, _app(db, owner))
+    task = _task_with_secret(db, dep)
+
+    with as_user(admin) as c:
+        assert c.get(f"/tasks/deployment/{dep.deploymentId}").status_code == 200
+        assert c.get(f"/tasks/{task.taskId}").status_code == 200
+
+
