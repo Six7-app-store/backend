@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, asc, desc, exists, func
+from sqlalchemy import and_, asc, desc, exists, func, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.models import (
@@ -501,8 +501,17 @@ def get_deployments(
             ),
         ).filter(_status_predicate(latest_subq, status))
 
-    # Order by deploymentId (UUID)
-    query = query.order_by(desc(Deployment.deploymentId))
+    # Newest first. A deployment has no created_at column; it came to life
+    # with its first task, which is also what the API reports as created_at.
+    # The id only breaks ties so that offset/limit pages stay stable. (The id
+    # alone is a random UUID v4 and orders by nothing.)
+    first_task_at = (
+        select(func.min(Task.created_at))
+        .where(Task.deploymentId == Deployment.deploymentId)
+        .correlate(Deployment)
+        .scalar_subquery()
+    )
+    query = query.order_by(desc(first_task_at).nulls_last(), desc(Deployment.deploymentId))
 
     return query.offset(skip).limit(limit).all()
 

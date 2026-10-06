@@ -27,7 +27,7 @@ def get_tasks(
         query = query.filter(Task.celeryTaskId == celery_task_id)
     if status:
         query = query.filter(Task.status == status)
-    return query.offset(skip).limit(limit).all()
+    return query.order_by(Task.created_at, Task.taskId).offset(skip).limit(limit).all()
 
 
 def create_task(db: Session, task: TaskCreate) -> Task:

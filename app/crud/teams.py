@@ -24,7 +24,7 @@ def get_teams(
     if deployment_id:
         query = query.filter(Team.deploymentId == deployment_id)
 
-    return query.offset(skip).limit(limit).all()
+    return query.order_by(Team.name, Team.teamId).offset(skip).limit(limit).all()
 
 
 def is_team_member(db: Session, team_id: UUID, user_id: UUID) -> bool:

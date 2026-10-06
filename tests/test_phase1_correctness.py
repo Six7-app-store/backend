@@ -203,3 +203,110 @@ def test_status_filter_rejects_an_unknown_status(db):
     assert bad.status_code == 422
     assert "paused" in bad.text  # nennt die erlaubten Werte
     assert good.status_code == 200
+
+
+# ================================================================
+# B-05 · Listen brauchen eine stabile, sinnvolle Reihenfolge
+# ================================================================
+@pytest.mark.integration
+def test_deployments_are_listed_newest_first(db):
+    """B-05: Sortiert wurde nach ``deploymentId``, einer zufälligen UUID v4,
+    also nach nichts Sinnvollem. Neueste zuerst, gemessen am ersten Task."""
+    import datetime as dt
+
+    from app.crud import deployments as crud
+    from app.models import TaskStatus, TaskType, UserRole
+    from tests.test_phase0_security import _user
+
+    owner = _user(db, UserRole.TEACHER)
+    created = {}
+    for day in (3, 6, 1, 5, 2, 4):  # absichtlich nicht in zeitlicher Reihenfolge
+        dep = _deployment_with_last_task(
+            db, owner, TaskType.DEPLOY, TaskStatus.SUCCESS,
+            created_at=dt.datetime(2026, 3, day, 12, 0, 0),
+        )
+        created[dep.deploymentId] = day
+
+    listed = [created[d.deploymentId] for d in crud.get_deployments(db, limit=50)]
+
+    assert listed == [6, 5, 4, 3, 2, 1]
+
+
+@pytest.mark.integration
+def test_deployment_pages_do_not_overlap_or_skip(db):
+    import datetime as dt
+
+    from app.crud import deployments as crud
+    from app.models import TaskStatus, TaskType, UserRole
+    from tests.test_phase0_security import _user
+
+    owner = _user(db, UserRole.TEACHER)
+    ids = [
+        _deployment_with_last_task(
+            db, owner, TaskType.DEPLOY, TaskStatus.SUCCESS,
+            created_at=dt.datetime(2026, 3, day, 12, 0, 0),
+        ).deploymentId
+        for day in range(1, 8)
+    ]
+
+    pages = [
+        [d.deploymentId for d in crud.get_deployments(db, skip=skip, limit=3)]
+        for skip in (0, 3, 6)
+    ]
+
+    assert [i for page in pages for i in page] == list(reversed(ids))
+
+
+@pytest.mark.integration
+def test_other_lists_have_a_defined_order(db):
+    """B-05: ``offset``/``limit`` ohne ``ORDER BY`` liefert in Postgres keine
+    garantierte Reihenfolge; Seiten können sich überlappen oder Zeilen auslassen.
+    Eingefügt wird hier in der Gegenrichtung der erwarteten Reihenfolge."""
+    import datetime as dt
+    import uuid
+
+    from app.crud import apps as crud_apps
+    from app.crud import courses as crud_courses
+    from app.crud import tasks as crud_tasks
+    from app.crud import teams as crud_teams
+    from app.crud import users as crud_users
+    from app.models import App, Course, Task, TaskStatus, TaskType, Team, User, UserRole
+    from tests.test_phase0_security import _app, _deployment, _user
+
+    owner = _user(db, UserRole.TEACHER)
+    days = (5, 4, 3, 2, 1)  # eingefügt von neu nach alt
+
+    # Apps und Nutzer: älteste zuerst
+    for d in days:
+        db.add(App(appId=uuid.uuid4(), name=f"app{d}", userId=owner.userId,
+                   created_at=dt.datetime(2026, 1, d)))
+        db.add(User(userId=uuid.uuid4(), email=f"o{d}@x.de", username=f"o{d}",
+                    role=UserRole.STUDENT, created_at=dt.datetime(2026, 1, d)))
+    db.commit()
+    assert [a.name for a in crud_apps.get_apps(db)] == [f"app{d}" for d in sorted(days)]
+    assert [a.name for a in crud_apps.get_visible_apps(db, owner.userId)] == [
+        f"app{d}" for d in sorted(days)
+    ]
+    students = [u.username for u in crud_users.get_users(db, role=UserRole.STUDENT)]
+    assert students == [f"o{d}" for d in sorted(days)]
+
+    # Kurse und Teams: nach Name
+    dep = _deployment(db, owner, _app(db, owner))
+    for name in ("c", "b", "a"):
+        db.add(Course(courseId=uuid.uuid4(), name=name))
+        db.add(Team(teamId=uuid.uuid4(), name=name, deploymentId=dep.deploymentId))
+    db.commit()
+    assert [c.name for c in crud_courses.get_courses(db)] == ["a", "b", "c"]
+    assert [t.name for t in crud_teams.get_teams(db, deployment_id=dep.deploymentId)] == [
+        "a", "b", "c",
+    ]
+
+    # Tasks: nach Erstellung
+    for d in days:
+        db.add(Task(taskId=uuid.uuid4(), deploymentId=dep.deploymentId, celeryTaskId=f"t{d}",
+                    type=TaskType.DEPLOY, status=TaskStatus.SUCCESS,
+                    created_at=dt.datetime(2026, 2, d)))
+    db.commit()
+    assert [t.celeryTaskId for t in crud_tasks.get_tasks(db, deployment_id=dep.deploymentId)] == [
+        f"t{d}" for d in sorted(days)
+    ]

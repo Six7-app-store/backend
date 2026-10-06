@@ -38,7 +38,7 @@ def get_apps(
     if user_id:
         query = query.filter(App.userId == user_id)
 
-    return query.offset(skip).limit(limit).all()
+    return query.order_by(App.created_at, App.appId).offset(skip).limit(limit).all()
 
 
 def get_visible_apps(
@@ -71,6 +71,7 @@ def get_visible_apps(
                 & App.appId.in_(approved_app_ids)
             )
         )
+        .order_by(App.created_at, App.appId)
         .offset(skip)
         .limit(limit)
         .all()
