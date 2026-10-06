@@ -1,7 +1,9 @@
-"""Regressionstests für die Korrektheitsfehler aus Phase 1 des Refactor-Plans
-(``REFACTOR_PLAN.md``, Befunde B-xx).
+"""Regressionstests für Korrektheitsfehler im Backend (Befunde B-01 … B-24 einer
+Durchsicht).
 
-Jeder Test ist zuerst gegen den fehlerhaften Stand rot gelaufen.
+Jeder Test ist zuerst gegen den fehlerhaften Stand rot gelaufen. Die
+Abschnittsüberschriften nennen das Kürzel des Befunds; was falsch war und warum,
+steht im Docstring des jeweiligen Tests.
 """
 import pytest
 

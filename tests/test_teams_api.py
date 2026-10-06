@@ -201,9 +201,8 @@ def test_get_team_member_ok(db, mock_user, mock_student):
 
 @pytest.mark.integration
 def test_get_team_non_member_403(db, mock_user, mock_student):
-    """Nicht-Mitglied: ein fremdes Team liefert 403 (Phase 0, A-07 — vorher
-    las ``get_team`` ohne jede Prüfung und lieferte 200), eine fehlende ID
-    weiterhin 404."""
+    """Nicht-Mitglied: ein fremdes Team liefert 403 (vorher las ``get_team``
+    ohne jede Prüfung und lieferte 200), eine fehlende ID weiterhin 404."""
     dep = _make_deployment(db, mock_user)
     team = _make_team(db, name="NonMemberTeam", deployment=dep)
 

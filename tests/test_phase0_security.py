@@ -1,8 +1,9 @@
-"""Regressionstests für die Sicherheits- und Berechtigungsfehler aus Phase 0
-des Refactor-Plans (``REFACTOR_PLAN.md``).
+"""Regressionstests für Sicherheits- und Berechtigungsfehler im Backend
+(Befunde A-01 … A-07 einer Durchsicht).
 
 Jeder Test hier ist zuerst gegen den fehlerhaften Stand rot gelaufen. Die
-Kommentare nennen die Plan-ID (A-01 … A-07), damit man den Befund nachlesen kann.
+Abschnittsüberschriften nennen das Kürzel des Befunds; was falsch war und warum,
+steht im Docstring des jeweiligen Tests.
 """
 import contextlib
 import json
