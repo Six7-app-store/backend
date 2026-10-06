@@ -894,3 +894,66 @@ def test_submit_all_versions_continues_after_a_database_error(db):
         for a in db.query(AppVersionApproval).filter(AppVersionApproval.appId == r.json()["appId"])
     }
     assert submitted == {"v2", "v3"}  # v1 scheiterte, die beiden anderen nicht
+
+
+# ================================================================
+# B-19 · Der Keystone-Timeout gilt für die eine Verbindung, nicht für den Prozess
+# ================================================================
+def _validator_payload():
+    from app.models import OpenStackAuthType
+    from app.schemas import OpenStackCredentialUpsert
+
+    return OpenStackCredentialUpsert(
+        auth_type=OpenStackAuthType.APPLICATION_CREDENTIAL,
+        auth_url="https://keystone.example/v3",
+        identifier="id",
+        secret="secret",
+    )
+
+
+@pytest.mark.unit
+def test_validate_does_not_touch_the_process_wide_socket_timeout():
+    """B-19: ``validate`` setzte ``socket.setdefaulttimeout(15)`` für den ganzen
+    Prozess und stellte ihn danach wieder her. Zwei gleichzeitige Prüfungen
+    (Sync-Endpunkte laufen im Thread-Pool) konnten 15 s dauerhaft festschreiben:
+    A merkt sich ``None`` und setzt 15, B merkt sich 15, A stellt ``None`` her,
+    B stellt 15 her."""
+    import socket
+    from unittest.mock import MagicMock, patch
+
+    from app.services import openstack_validator
+
+    seen = {}
+
+    def fake_connect(**kwargs):
+        seen["kwargs"] = kwargs
+        seen["during"] = socket.getdefaulttimeout()
+        return MagicMock()
+
+    before = socket.getdefaulttimeout()
+    with patch("app.services.openstack_validator.openstack.connect", fake_connect):
+        ok, error = openstack_validator.validate(_validator_payload())
+
+    assert (ok, error) == (True, None)
+    assert seen["during"] == before
+    assert socket.getdefaulttimeout() == before
+    # Stattdessen bekommt genau diese Verbindung einen Timeout (keystoneauth-Session).
+    assert seen["kwargs"]["api_timeout"] == 15
+
+
+@pytest.mark.unit
+def test_validate_reports_a_keystone_timeout_as_unreachable():
+    from unittest.mock import patch
+
+    from keystoneauth1 import exceptions as ksa_exc
+
+    from app.services import openstack_validator
+
+    def timing_out(**_kwargs):
+        raise ksa_exc.ConnectTimeout("timed out")
+
+    with patch("app.services.openstack_validator.openstack.connect", timing_out):
+        ok, error = openstack_validator.validate(_validator_payload())
+
+    assert ok is False
+    assert error.startswith("Could not reach auth_url")
