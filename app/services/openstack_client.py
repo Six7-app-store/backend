@@ -147,6 +147,11 @@ def cached_list(
     data = fetch()
 
     with _cache_lock:
+        # Entries are only ever read by their own key, so an expired one would
+        # stay in memory forever. Sweep them while we hold the lock anyway.
+        current = time.monotonic()
+        for stale in [k for k, (expires, _) in _cache.items() if expires <= current]:
+            del _cache[stale]
         _cache[key] = (now + _TTL_SECONDS, data)
 
     return data

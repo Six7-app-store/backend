@@ -957,3 +957,88 @@ def test_validate_reports_a_keystone_timeout_as_unreachable():
 
     assert ok is False
     assert error.startswith("Could not reach auth_url")
+
+
+# ================================================================
+# B-20 · Der OpenStack-Listen-Cache räumt auf und folgt den Zugangsdaten
+# ================================================================
+@pytest.fixture
+def clean_openstack_cache():
+    from app.services import openstack_client
+
+    openstack_client._cache.clear()
+    yield openstack_client
+    openstack_client._cache.clear()
+
+
+@pytest.mark.unit
+def test_expired_cache_entries_are_dropped_on_the_next_write(clean_openstack_cache):
+    """B-20: Abgelaufene Einträge wurden nie entfernt, nur ``invalidate_user``
+    räumte auf. Der Cache wuchs mit Nutzer x Ressourcenart x Filter."""
+    import uuid
+    from unittest.mock import patch
+
+    client = clean_openstack_cache
+    user = uuid.uuid4()
+    now = {"t": 1000.0}
+
+    with patch.object(client.time, "monotonic", lambda: now["t"]):
+        client.cached_list(user, "networks", None, lambda: [{"id": "n"}])
+        client.cached_list(user, "flavors", None, lambda: [{"id": "f"}])
+        assert len(client._cache) == 2
+
+        now["t"] += client._TTL_SECONDS + 1  # beide abgelaufen
+        client.cached_list(user, "images", None, lambda: [{"id": "i"}])
+
+    assert [key[1] for key in client._cache] == ["images"]
+
+
+@pytest.mark.unit
+def test_a_valid_cache_entry_is_still_served_without_fetching(clean_openstack_cache):
+    import uuid
+    from unittest.mock import patch
+
+    client = clean_openstack_cache
+    user = uuid.uuid4()
+    fetches = []
+
+    def fetch():
+        fetches.append(1)
+        return [{"id": "n"}]
+
+    with patch.object(client.time, "monotonic", lambda: 1000.0):
+        client.cached_list(user, "networks", None, fetch)
+        client.cached_list(user, "networks", None, fetch)
+
+    assert len(fetches) == 1
+
+
+@pytest.mark.integration
+def test_changing_credentials_clears_the_users_cached_lists(db):
+    """B-20: Wechselt ein Nutzer das OpenStack-Projekt, sah er bis zu 60 s lang
+    Netzwerke, Flavors und Images des alten Projekts."""
+    from unittest.mock import patch
+
+    from app.models import UserRole
+    from tests.test_phase0_security import _user, as_user
+
+    owner = _user(db, UserRole.TEACHER)
+    body = {
+        "auth_type": "v3applicationcredential",
+        "auth_url": "https://keystone.example/v3",
+        "identifier": "id",
+        "secret": "secret",
+    }
+
+    with (
+        patch("app.routers.openstack_credentials.openstack_validator.validate",
+              return_value=(True, None)),
+        patch("app.routers.openstack_credentials.openstack_client.invalidate_user") as invalidate,
+        as_user(owner) as c,
+    ):
+        put = c.put("/me/openstack-credentials", json=body)
+        deleted = c.delete("/me/openstack-credentials")
+
+    assert put.status_code == 200, put.text
+    assert deleted.status_code == 204
+    assert [call.args[0] for call in invalidate.call_args_list] == [owner.userId, owner.userId]

@@ -19,7 +19,7 @@ from app.schemas import (
     OpenStackCredentialResponse,
     OpenStackCredentialUpsert,
 )
-from app.services import clouds_yaml_parser, openstack_validator
+from app.services import clouds_yaml_parser, openstack_client, openstack_validator
 from app.utils.auth import get_current_user
 
 router = APIRouter()
@@ -118,6 +118,8 @@ def upsert_my_credentials(
     _assert_unlocked(db, current_user)
     result = openstack_validator.validate(payload)
     row = crud_creds.upsert(db, current_user.userId, payload, result)
+    # Cached networks, flavors and images belong to the previous credentials.
+    openstack_client.invalidate_user(current_user.userId)
     is_locked, n = _lock_state(db, current_user.userId)
     return _to_response(row, has_credential=True, is_locked=is_locked, active_deployments=n)
 
@@ -136,6 +138,8 @@ def upsert_my_credentials_from_yaml(
     payload = clouds_yaml_parser.parse(body.clouds_yaml, body.cloud_name)
     result = openstack_validator.validate(payload)
     row = crud_creds.upsert(db, current_user.userId, payload, result)
+    # Cached networks, flavors and images belong to the previous credentials.
+    openstack_client.invalidate_user(current_user.userId)
     is_locked, n = _lock_state(db, current_user.userId)
     return _to_response(row, has_credential=True, is_locked=is_locked, active_deployments=n)
 
@@ -190,6 +194,7 @@ def delete_my_credentials(
     crud_locks.acquire_user_xact_lock(db, current_user.userId)
     _assert_unlocked(db, current_user)
     deleted = crud_creds.delete(db, current_user.userId)
+    openstack_client.invalidate_user(current_user.userId)
     if not deleted:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
