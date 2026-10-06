@@ -88,6 +88,22 @@ def _platform_of(host: str) -> str:
     return "unknown"
 
 
+def _version_sort_key(version: dict[str, Any]) -> tuple[int, tuple[int, ...], str]:
+    """Sort key for a tag entry; every key has the same shape.
+
+    Tags that read as dotted numbers (``v1.10.0``) sort numerically and come
+    first when sorted in reverse. Anything else (``latest``, ``v1.3.0-rc1``)
+    sorts after them by name. The key must stay comparable across both kinds:
+    the old key mixed int tuples with str tuples, which made ``list.sort``
+    raise ``TypeError`` as soon as a repository had one non-numeric tag.
+    """
+    name = str(version.get("version") or "")
+    try:
+        return (1, tuple(int(part) for part in name.lstrip("v").split(".")), name)
+    except ValueError:
+        return (0, (), name)
+
+
 class GitService:
     """Service for Git operations and release management."""
 
@@ -502,14 +518,7 @@ class GitService:
                 if v['version'] in releases:
                     v.update(releases[v['version']])
 
-            # Sort by semantic versioning
-            def sort_key(v):
-                try:
-                    return tuple(map(int, v['version'].lstrip('v').split('.')))
-                except (ValueError, AttributeError):
-                    return (v['version'],)
-
-            versions.sort(key=sort_key, reverse=True)
+            versions.sort(key=_version_sort_key, reverse=True)
             logger.info(f"Found {len(versions)} versions")
             return versions
 
