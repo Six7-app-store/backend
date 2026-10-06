@@ -1042,3 +1042,124 @@ def test_changing_credentials_clears_the_users_cached_lists(db):
     assert put.status_code == 200, put.text
     assert deleted.status_code == 204
     assert [call.args[0] for call in invalidate.call_args_list] == [owner.userId, owner.userId]
+
+
+# ================================================================
+# B-22 · Alle Tags laden, und gleichzeitige Klone behindern sich nicht
+# ================================================================
+class _Page:
+    status_code = 200
+
+    def __init__(self, items, next_url=None):
+        self._items = items
+        self.links = {"next": {"url": next_url}} if next_url else {}
+
+    def json(self):
+        return self._items
+
+    def raise_for_status(self):
+        return None
+
+
+class _PagedSession:
+    """Antwortet je URL mit einer Seite; merkt sich jeden Aufruf."""
+
+    def __init__(self, pages):
+        self.pages = pages
+        self.calls = []
+
+    def get(self, url, headers=None, timeout=None, params=None):
+        self.calls.append({"url": url, "params": params, "headers": dict(headers or {})})
+        return self.pages[url]
+
+
+def _tag(name):
+    return {"name": name, "commit": {"sha": "abcdef0123456789"}}
+
+
+def _paged_service(pages):
+    from app.services.git_service import GitService
+
+    svc = GitService.__new__(GitService)
+    svc.token = "T"
+    svc._session = _PagedSession(pages)
+    return svc
+
+
+TAGS_URL = "https://api.github.com/repos/o/r/tags"
+RELEASES_URL = "https://api.github.com/repos/o/r/releases"
+
+
+@pytest.mark.unit
+def test_get_versions_follows_the_next_page_links():
+    """B-22: ``_request_tags`` las nur die erste Seite. GitHub liefert davon 30
+    Tags, GitLab 20; bei mehr Tags fehlten Versionen in der App."""
+    svc = _paged_service({
+        TAGS_URL: _Page([_tag("v1"), _tag("v2")], next_url=TAGS_URL + "?page=2"),
+        TAGS_URL + "?page=2": _Page([_tag("v3")]),
+        RELEASES_URL: _Page([]),
+    })
+
+    versions = [v["version"] for v in svc.get_versions("https://github.com/o/r")]
+
+    assert sorted(versions) == ["v1", "v2", "v3"]
+    first = svc._session.calls[0]
+    assert first["params"] == {"per_page": 100}  # so wenige Seiten wie möglich
+
+
+@pytest.mark.unit
+def test_pagination_never_follows_a_link_to_another_host():
+    """Der Header trägt das Plattform-Token; ein ``Link`` auf einen fremden Host
+    darf es nicht bekommen."""
+    evil = "https://evil.example/steal"
+    svc = _paged_service({
+        TAGS_URL: _Page([_tag("v1")], next_url=evil),
+        RELEASES_URL: _Page([]),
+    })
+
+    versions = [v["version"] for v in svc.get_versions("https://github.com/o/r")]
+
+    assert versions == ["v1"]
+    assert all(call["url"] != evil for call in svc._session.calls)
+
+
+@pytest.mark.unit
+def test_pagination_stops_after_a_fixed_number_of_pages():
+    from app.services import git_service as git_module
+
+    pages = {TAGS_URL: _Page([_tag("v0")], next_url=TAGS_URL + "?page=1"), RELEASES_URL: _Page([])}
+    for n in range(1, 100):
+        pages[f"{TAGS_URL}?page={n}"] = _Page([_tag(f"v{n}")], next_url=f"{TAGS_URL}?page={n + 1}")
+    svc = _paged_service(pages)
+
+    versions = svc.get_versions("https://github.com/o/r")
+
+    assert len(versions) == git_module._MAX_PAGES
+
+
+@pytest.mark.unit
+def test_variable_scans_of_the_same_app_version_use_separate_clone_directories():
+    """B-22: Der Klon-Pfad hing nur an App und Version. ``clone_release_vars``
+    löscht ihn zu Beginn; zwei gleichzeitige Anfragen räumten sich so gegenseitig
+    das Verzeichnis weg (sporadisch 500, danach übersprang die Validierung)."""
+    import types
+    import uuid
+    from unittest.mock import patch
+
+    from fastapi import HTTPException
+
+    from app.services import hcl_variable_parser
+
+    app = types.SimpleNamespace(appId=uuid.uuid4(), git_link="https://github.com/o/r")
+    used = []
+
+    def fake_clone(_url, _tag, directory_id):
+        used.append(directory_id)
+        raise RuntimeError("stop here")
+
+    with patch.object(hcl_variable_parser.git_service, "clone_release_vars", fake_clone):
+        for _ in range(2):
+            with pytest.raises(HTTPException):
+                hcl_variable_parser.load_variable_definitions(app, "v1")
+
+    assert len(used) == 2 and used[0] != used[1]

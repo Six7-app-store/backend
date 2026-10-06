@@ -457,7 +457,7 @@ class _FakeSession:
     def __init__(self):
         self.calls = []
 
-    def get(self, url, headers=None, timeout=None):
+    def get(self, url, headers=None, timeout=None, params=None):
         self.calls.append((url, dict(headers or {})))
 
         class _R:

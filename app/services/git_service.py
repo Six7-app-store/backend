@@ -104,6 +104,12 @@ def _version_sort_key(version: dict[str, Any]) -> tuple[int, tuple[int, ...], st
         return (0, (), name)
 
 
+# Page size requested from the provider APIs (100 is the maximum for both) and
+# the most pages read per resource.
+_PAGE_SIZE = 100
+_MAX_PAGES = 20
+
+
 class GitService:
     """Service for Git operations and release management."""
 
@@ -176,25 +182,61 @@ class GitService:
         logger.warning(f"Could not parse git URL: {git_url}")
         return None
 
-    def _request_tags(self, parsed: dict[str, str]) -> requests.Response:
-        """Build and perform the tags request for the parsed repository.
-
-        Constructs the provider-specific tags URL and headers (GitHub vs.
-        GitLab, including auth token handling) and issues the GET request,
-        returning the raw response for the caller to interpret.
-        """
+    def _api_headers(self, parsed: dict[str, str]) -> dict[str, str]:
+        """Provider-specific auth headers (GitHub vs. GitLab)."""
         if parsed['platform'] == 'github':
-            api_url = f"https://api.github.com/repos/{parsed['owner']}/{parsed['repo']}/tags"
-            headers = {
+            return {
                 'Authorization': f"token {self.token}",
                 'Accept': 'application/vnd.github.v3+json',
             }
-        else:  # gitlab
-            project_path = quote(f"{parsed['owner']}/{parsed['repo']}", safe='')
-            api_url = f"https://{parsed['host']}/api/v4/projects/{project_path}/repository/tags"
-            headers = {'PRIVATE-TOKEN': self.token}
+        return {'PRIVATE-TOKEN': self.token}
 
-        return self._session.get(api_url, headers=headers, timeout=10)
+    def _api_url(self, parsed: dict[str, str], resource: str) -> str:
+        """URL of ``tags`` or ``releases`` for the parsed repository."""
+        if parsed['platform'] == 'github':
+            return f"https://api.github.com/repos/{parsed['owner']}/{parsed['repo']}/{resource}"
+        project_path = quote(f"{parsed['owner']}/{parsed['repo']}", safe='')
+        return f"https://{parsed['host']}/api/v4/projects/{project_path}/{resource}"
+
+    def _request_tags(self, parsed: dict[str, str]) -> requests.Response:
+        """Build and perform the tags request for the parsed repository.
+
+        Issues the GET for the first page and returns the raw response for the
+        caller to interpret; further pages come from :meth:`_all_pages`.
+        """
+        return self._session.get(
+            self._api_url(parsed, 'tags'),
+            headers=self._api_headers(parsed),
+            params={'per_page': _PAGE_SIZE},
+            timeout=10,
+        )
+
+    def _all_pages(
+        self, response: requests.Response, headers: dict[str, str], url: str
+    ) -> list[Any]:
+        """Items of ``response`` and of every page that follows it.
+
+        Both providers announce the next page in the ``Link`` header, which
+        ``requests`` parses into ``response.links``. Without this only the first
+        page was read: 30 tags on GitHub, 20 on GitLab. A next link is followed
+        only if it stays on the host of ``url``: the headers carry the platform
+        token. The loop is bounded by ``_MAX_PAGES``.
+        """
+        items = list(response.json())
+        host = urlparse(url).netloc
+        for _ in range(_MAX_PAGES - 1):
+            next_url = (response.links.get('next') or {}).get('url')
+            if not next_url:
+                return items
+            if urlparse(next_url).netloc != host:
+                logger.warning("Not following a pagination link to another host: %s", next_url)
+                return items
+            response = self._session.get(next_url, headers=headers, timeout=10)
+            response.raise_for_status()
+            items.extend(response.json())
+        if (response.links.get('next') or {}).get('url'):
+            logger.warning("Stopped after %d pages of %s", _MAX_PAGES, url)
+        return items
 
     def _fetch_github_tags(self, parsed: dict[str, str]) -> list[dict[str, Any]]:
         """Fetch all tags from GitHub API."""
@@ -204,15 +246,18 @@ class GitService:
             return []
 
         response.raise_for_status()
-        return [{'version': tag['name'], 'commit': tag['commit']['sha'][:8], 'type': 'tag'} for tag in response.json()]
+        tags = self._all_pages(response, self._api_headers(parsed), self._api_url(parsed, 'tags'))
+        return [
+            {'version': tag['name'], 'commit': tag['commit']['sha'][:8], 'type': 'tag'}
+            for tag in tags
+        ]
 
     def _fetch_github_releases(self, parsed: dict[str, str]) -> dict[str, dict[str, Any]]:
         """Fetch releases from GitHub API."""
-        api_url = f"https://api.github.com/repos/{parsed['owner']}/{parsed['repo']}/releases"
+        api_url = self._api_url(parsed, 'releases')
+        headers = self._api_headers(parsed)
         response = self._session.get(
-            api_url,
-            headers={'Authorization': f"token {self.token}", 'Accept': 'application/vnd.github.v3+json'},
-            timeout=10
+            api_url, headers=headers, params={'per_page': _PAGE_SIZE}, timeout=10
         )
 
         if response.status_code == 404:
@@ -228,7 +273,7 @@ class GitService:
                 'prerelease': str(release.get('prerelease', False)),
                 'html_url': release.get('html_url', ''),
             }
-            for release in response.json() if release.get('tag_name')
+            for release in self._all_pages(response, headers, api_url) if release.get('tag_name')
         }
 
     def _fetch_gitlab_tags(self, parsed: dict[str, str]) -> list[dict[str, Any]]:
@@ -239,16 +284,18 @@ class GitService:
             return []
 
         response.raise_for_status()
-        return [{'version': tag['name'], 'commit': tag['commit']['id'][:8], 'type': 'tag'} for tag in response.json()]
+        tags = self._all_pages(response, self._api_headers(parsed), self._api_url(parsed, 'tags'))
+        return [
+            {'version': tag['name'], 'commit': tag['commit']['id'][:8], 'type': 'tag'}
+            for tag in tags
+        ]
 
     def _fetch_gitlab_releases(self, parsed: dict[str, str]) -> dict[str, dict[str, Any]]:
         """Fetch releases from GitLab API."""
-        project_path = quote(f"{parsed['owner']}/{parsed['repo']}", safe='')
-        api_url = f"https://{parsed['host']}/api/v4/projects/{project_path}/releases"
+        api_url = self._api_url(parsed, 'releases')
+        headers = self._api_headers(parsed)
         response = self._session.get(
-            api_url,
-            headers={'PRIVATE-TOKEN': self.token},
-            timeout=10
+            api_url, headers=headers, params={'per_page': _PAGE_SIZE}, timeout=10
         )
 
         if response.status_code == 404:
@@ -264,7 +311,7 @@ class GitService:
                 'prerelease': 'False',
                 'html_url': release.get('_links', {}).get('self', ''),
             }
-            for release in response.json() if release.get('tag_name')
+            for release in self._all_pages(response, headers, api_url) if release.get('tag_name')
         }
 
     def _accept_github_invite(self, parsed: dict[str, str]) -> dict[str, Any]:

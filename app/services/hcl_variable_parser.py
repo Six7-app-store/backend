@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -1239,7 +1240,9 @@ def load_variable_definitions(app, version: str) -> list[dict[str, Any]]:
             detail="App has no Git repository configured",
         )
 
-    deployment_id = f"vars_{app.appId}_{version}".replace("/", "_")
+    # Unique per call: ``clone_release_vars`` deletes the directory it is about to
+    # use, so two requests for the same app and version must not share one.
+    deployment_id = f"vars_{app.appId}_{version}_{uuid.uuid4().hex[:8]}".replace("/", "_")
     repo_path = None
     try:
         repo_path = git_service.clone_release_vars(app.git_link, version, deployment_id)
