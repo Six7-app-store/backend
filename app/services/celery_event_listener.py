@@ -19,6 +19,7 @@ The custom events carry ``deployment_id`` directly in the payload so the
 listener doesn't need a Postgres roundtrip on the hot path.
 """
 
+import ast
 import json
 import logging
 import re
@@ -306,41 +307,58 @@ def _handle_task_succeeded(celery_task_id: str) -> tuple[dict, Any]:
     return update_data, outputs
 
 
+# ``Failure('<payload>')`` as the worker renders it: ``Failure.__repr__`` is
+# ``Failure({args[0]!r})``, so the argument is a complete Python string literal
+# (single- or double-quoted, with backslash escapes). Matching the literal as a
+# whole, instead of "up to the first ``')``", keeps a ``')`` inside the payload
+# from cutting it short.
+_FAILURE_REPR_RE = re.compile(
+    r"""Failure\((?P<arg>'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")\)""",
+    re.DOTALL,
+)
+_FAILURE_BARE_RE = re.compile(r"Failure:\s*(\{.+?\})\s*$", re.DOTALL)
+
+
 def _parse_structured_failure(exception_type: Any, traceback: str) -> dict | None:
     """Extract the worker's structured ``Failure`` JSON payload, if present.
 
     The worker raises ``Failure`` whose ``args[0]`` is a JSON payload
     with logs/tf_state/etc. It can surface in two forms:
 
-     1. ``Failure: {"error": ...}`` in the traceback's final line, and
-        ``Failure('{"error": ...}')`` in ``event['exception']``.
-     2. ``Failure('...')`` literally inside the traceback.
+     1. ``Failure('<json>')``, the ``repr()`` of the exception, in
+        ``event['exception']`` or inside the traceback;
+     2. ``Failure: {"error": ...}`` in the traceback's final line.
 
     Searches the exception field first, then the traceback. Returns the
     decoded dict, or ``None`` when no structured payload could be parsed.
+
+    The ``repr()`` form is decoded with ``ast.literal_eval`` — the inverse of
+    ``repr`` for a string — so umlauts and escapes come back unchanged. The
+    previous ``encode('utf-8').decode('unicode_escape')`` read UTF-8 bytes as
+    Latin-1 and turned ``Schlüssel`` into ``SchlÃ¼ssel``.
     """
-    candidates = [str(exception_type or ''), traceback or '']
-    for haystack in candidates:
+    for haystack in (str(exception_type or ""), traceback or ""):
         if not haystack:
             continue
-        # Match ``Failure('<json>')`` or ``Failure: <json>``.
-        match = (
-            re.search(r"Failure\('(.+?)'\)", haystack, re.DOTALL)
-            or re.search(r"Failure:\s*(\{.+?\})\s*$", haystack, re.DOTALL)
-        )
-        if not match:
-            continue
-        json_str = match.group(1)
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            # The repr() form escapes embedded quotes; decode once.
+        candidates: list[str] = []
+        repr_match = _FAILURE_REPR_RE.search(haystack)
+        if repr_match:
             try:
-                return json.loads(
-                    json_str.encode('utf-8').decode('unicode_escape')
-                )
-            except (json.JSONDecodeError, UnicodeDecodeError):
+                literal = ast.literal_eval(repr_match.group("arg"))
+            except (ValueError, SyntaxError):
+                literal = None
+            if isinstance(literal, str):
+                candidates.append(literal)
+        bare_match = _FAILURE_BARE_RE.search(haystack)
+        if bare_match:
+            candidates.append(bare_match.group(1))
+        for text in candidates:
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
                 continue
+            if isinstance(data, dict):
+                return data
     return None
 
 

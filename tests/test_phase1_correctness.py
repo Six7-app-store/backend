@@ -441,3 +441,60 @@ def test_download_with_a_plain_filename_keeps_working(db):
 
     assert r.status_code == 200
     assert 'filename="aufgabe.pdf"' in r.headers["content-disposition"]
+
+
+# ================================================================
+# B-07 · Die strukturierte Worker-Fehlermeldung wird unverändert gelesen
+# ================================================================
+def _worker_repr(payload):
+    """So rendert der Worker die Ausnahme: ``Failure.__repr__`` ist
+    ``Failure({args[0]!r})`` mit dem JSON-String als einzigem Argument."""
+    import json
+
+    return f"Failure({json.dumps(payload)!r})"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "error",
+    [
+        "Schlüssel fehlt",                     # B-07: ``unicode_escape`` machte "SchlÃ¼ssel"
+        "Größe 5 € überschritten",
+        "tofu said: can't read 'x') here",    # ``')`` brach die nicht-gierige Regex ab
+        'quote " and backslash \\ and newline \n inside',
+    ],
+)
+def test_structured_failure_survives_the_repr_round_trip(error):
+    from app.services.celery_event_listener import _parse_structured_failure
+
+    payload = {"error": error, "logs": [], "tf_state": None}
+
+    parsed = _parse_structured_failure(_worker_repr(payload), "")
+
+    assert parsed == payload
+
+
+@pytest.mark.unit
+def test_structured_failure_is_found_in_the_traceback_too():
+    from app.services.celery_event_listener import _parse_structured_failure
+
+    payload = {"error": "Größe", "logs": []}
+    traceback = f"Traceback (most recent call last):\n  ...\n{_worker_repr(payload)}\n"
+
+    assert _parse_structured_failure("", traceback) == payload
+
+
+@pytest.mark.unit
+def test_structured_failure_accepts_the_bare_json_form():
+    from app.services.celery_event_listener import _parse_structured_failure
+
+    traceback = 'celery.exceptions.Foo: Failure: {"error": "x", "logs": []}'
+
+    assert _parse_structured_failure("", traceback) == {"error": "x", "logs": []}
+
+
+@pytest.mark.unit
+def test_structured_failure_returns_none_for_other_exceptions():
+    from app.services.celery_event_listener import _parse_structured_failure
+
+    assert _parse_structured_failure("WorkerLostError('x')", "boom") is None
