@@ -361,3 +361,83 @@ def test_course_scope_listing_is_empty_for_a_teacher_without_courses(db):
 
     assert r.status_code == 200
     assert r.json() == []
+
+
+# ================================================================
+# B-06 · Der Download-Header verträgt jeden Dateinamen
+# ================================================================
+def _deployment_with_upload(db, owner, filename):
+    import base64
+    import json
+
+    from tests.test_phase0_security import _app, _deployment
+
+    dep = _deployment(db, owner, _app(db, owner))
+    payload = b"inhalt"
+    dep.userInputVar = json.dumps({
+        "terraform": {
+            "task_file": {
+                "all": {
+                    "name": filename,
+                    "content_b64": base64.b64encode(payload).decode(),
+                    "size": len(payload),
+                    "content_type": "text/plain",
+                }
+            }
+        }
+    })
+    db.commit()
+    return dep
+
+
+@pytest.mark.integration
+def test_download_with_umlaut_and_euro_sign_in_the_filename(db):
+    """B-06: Der Dateiname ging roh in den Header. Starlette kodiert Header als
+    Latin-1, ``€`` warf ``UnicodeEncodeError`` und der Download endete in 500."""
+    from app.models import UserRole
+    from tests.test_phase0_security import _user, as_user
+
+    owner = _user(db, UserRole.TEACHER)
+    dep = _deployment_with_upload(db, owner, "Übung €.txt")
+
+    with as_user(owner) as c:
+        r = c.get(f"/deployments/{dep.deploymentId}/files/task_file/all")
+
+    assert r.status_code == 200, r.text
+    assert r.content == b"inhalt"
+    header = r.headers["content-disposition"]
+    assert header.isascii()
+    assert "filename*=UTF-8''%C3%9Cbung%20%E2%82%AC.txt" in header
+
+
+@pytest.mark.integration
+def test_download_filename_cannot_break_out_of_the_header(db):
+    from app.models import UserRole
+    from tests.test_phase0_security import _user, as_user
+
+    owner = _user(db, UserRole.TEACHER)
+    dep = _deployment_with_upload(db, owner, 'a"b\r\nX-Evil: 1.txt')
+
+    with as_user(owner) as c:
+        r = c.get(f"/deployments/{dep.deploymentId}/files/task_file/all")
+
+    assert r.status_code == 200, r.text
+    assert "x-evil" not in r.headers
+    header = r.headers["content-disposition"]
+    assert "\r" not in header and "\n" not in header
+    assert header.count('"') == 2  # nur die Anführungszeichen um den ASCII-Namen
+
+
+@pytest.mark.integration
+def test_download_with_a_plain_filename_keeps_working(db):
+    from app.models import UserRole
+    from tests.test_phase0_security import _user, as_user
+
+    owner = _user(db, UserRole.TEACHER)
+    dep = _deployment_with_upload(db, owner, "aufgabe.pdf")
+
+    with as_user(owner) as c:
+        r = c.get(f"/deployments/{dep.deploymentId}/files/task_file/all")
+
+    assert r.status_code == 200
+    assert 'filename="aufgabe.pdf"' in r.headers["content-disposition"]

@@ -6,6 +6,7 @@ import logging
 import re
 from collections.abc import AsyncIterator
 from dataclasses import asdict
+from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -1680,6 +1681,23 @@ def resume_deployment(
     )
 
 
+def _content_disposition(filename: str) -> str:
+    """``Content-Disposition`` for a download, safe for any file name.
+
+    The name is user input. Put raw into the header, a ``€`` made Starlette
+    fail while encoding it (headers are Latin-1) and a quote or line break let
+    the name leave the header value. So the legacy ``filename`` carries an ASCII
+    fallback with every other character replaced, and ``filename*`` (RFC 5987)
+    carries the real name, percent-encoded.
+    """
+    unsafe = {'"', "\\", ";"}  # quote, backslash, semicolon
+    fallback = "".join(
+        c if c.isascii() and c.isprintable() and c not in unsafe else "_" for c in filename
+    ) or "download"
+    encoded = quote(filename, safe="")
+    return f'attachment; filename="{fallback}"; filename*=UTF-8\'\'{encoded}'
+
+
 # ----------------------------------------------------------------
 # DOWNLOAD UPLOADED FILE
 # ----------------------------------------------------------------
@@ -1765,13 +1783,7 @@ def download_deployment_file(
         content=payload,
         media_type=content_type,
         headers={
-            # ``filename*`` is the RFC 5987 form for non-ASCII names;
-            # we always emit it alongside the legacy ``filename`` so
-            # clients without UTF-8 support still see something.
-            "Content-Disposition": (
-                f'attachment; filename="{filename}"; '
-                f"filename*=UTF-8''{filename}"
-            ),
+            "Content-Disposition": _content_disposition(filename),
             "Content-Length": str(len(payload)),
         },
     )
