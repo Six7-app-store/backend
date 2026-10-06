@@ -125,6 +125,20 @@ class AppBase(BaseModel):
     git_link: str | None = None
     is_private: bool = False
 
+
+class AppCreate(AppBase):
+    # Image is sent as a full data-URL string, e.g.
+    # ``"data:image/png;base64,iVBORw0KG..."``. The router decodes the
+    # base64 part to bytes and stores mime + bytes in two columns.
+    image: str | None = None
+    # When True and is_private=False, all existing Git tags are
+    # automatically submitted for review right after creation.
+    submit_all_versions: bool = False
+
+    # The check belongs on input only. ``AppResponse`` also derives from
+    # ``AppBase``, and FastAPI validates every response, so a validator on the
+    # base class resolved DNS once per app in every listing.
+
     @field_validator("git_link")
     @classmethod
     def validate_git_link(cls, v: str | None) -> str | None:
@@ -156,16 +170,6 @@ class AppBase(BaseModel):
                 "addresses are not allowed"
             )
         return v
-
-
-class AppCreate(AppBase):
-    # Image is sent as a full data-URL string, e.g.
-    # ``"data:image/png;base64,iVBORw0KG..."``. The router decodes the
-    # base64 part to bytes and stores mime + bytes in two columns.
-    image: str | None = None
-    # When True and is_private=False, all existing Git tags are
-    # automatically submitted for review right after creation.
-    submit_all_versions: bool = False
 
 
 class AppUpdate(BaseModel):

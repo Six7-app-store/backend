@@ -43,3 +43,66 @@ def test_get_versions_sorts_plain_semver_descending():
     versions = [v["version"] for v in svc.get_versions("https://github.com/o/r")]
 
     assert versions == ["v2.0.0", "v1.5.3", "v1.0.0"]
+
+
+# ================================================================
+# B-02 · Das Ausgabe-Schema einer App darf kein DNS auflösen
+# ================================================================
+@pytest.mark.unit
+def test_app_response_does_not_resolve_dns():
+    """B-02: ``AppResponse`` erbte den ``git_link``-Validator von ``AppBase``.
+    FastAPI validiert Antworten, also lief pro App ein blockierender
+    ``gethostbyname`` im Request; löste ein Host später privat auf, scheiterte
+    die ganze Liste mit 500."""
+    import datetime as dt
+    import uuid
+    from unittest.mock import patch
+
+    from app.schemas import AppResponse
+
+    with patch("socket.gethostbyname", side_effect=AssertionError("DNS lookup")) as dns:
+        for _ in range(3):
+            AppResponse.model_validate({
+                "appId": uuid.uuid4(),
+                "userId": uuid.uuid4(),
+                "name": "a",
+                "git_link": "https://github.com/o/r",
+                "created_at": dt.datetime.now(),
+                "is_private": False,
+            })
+
+    dns.assert_not_called()
+
+
+@pytest.mark.unit
+def test_app_response_accepts_a_link_that_now_resolves_privately():
+    import datetime as dt
+    import uuid
+    from unittest.mock import patch
+
+    from app.schemas import AppResponse
+
+    with patch("socket.gethostbyname", return_value="10.0.0.5"):
+        out = AppResponse.model_validate({
+            "appId": uuid.uuid4(),
+            "userId": uuid.uuid4(),
+            "name": "a",
+            "git_link": "https://git.example.org/o/r",
+            "created_at": dt.datetime.now(),
+            "is_private": False,
+        })
+
+    assert out.git_link == "https://git.example.org/o/r"
+
+
+@pytest.mark.unit
+def test_app_create_still_rejects_private_hosts():
+    """Gegenprobe: Die Prüfung gehört auf die Eingabe und bleibt dort."""
+    from unittest.mock import patch
+
+    from pydantic import ValidationError
+
+    from app.schemas import AppCreate
+
+    with patch("socket.gethostbyname", return_value="10.0.0.5"), pytest.raises(ValidationError):
+        AppCreate(name="a", git_link="https://git.example.org/o/r")
