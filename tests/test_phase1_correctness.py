@@ -498,3 +498,121 @@ def test_structured_failure_returns_none_for_other_exceptions():
     from app.services.celery_event_listener import _parse_structured_failure
 
     assert _parse_structured_failure("WorkerLostError('x')", "boom") is None
+
+
+# ================================================================
+# B-10 · Der Event-Listener baut die Verbindung wieder auf
+# ================================================================
+class _StopListener(BaseException):
+    """Beendet die Endlosschleife im Test (kein ``Exception``, wird also nicht gefangen)."""
+
+
+@pytest.mark.unit
+def test_event_listener_reconnects_with_growing_delay_after_a_crash(caplog):
+    """B-10: ``capture`` lief in einem Daemon-Thread ohne Schleife und ohne
+    Fehlerbehandlung. Brach die Verbindung zu RabbitMQ ab, starb der Thread
+    still, und das Backend bekam bis zum Neustart keine Events mehr."""
+    from unittest.mock import patch
+
+    from app.services import celery_event_listener as listener
+
+    calls = []
+
+    def flaky_listen_once():
+        calls.append(1)
+        if len(calls) < 4:
+            raise RuntimeError("broker connection lost")
+        raise _StopListener
+
+    sleeps = []
+    with (
+        patch.object(listener, "_listen_once", flaky_listen_once),
+        patch.object(listener.time, "sleep", sleeps.append),
+        pytest.raises(_StopListener),
+    ):
+        listener.start_event_listener()
+
+    assert len(calls) == 4
+    assert sleeps == [1.0, 2.0, 4.0]
+    crashes = [r for r in caplog.records if r.exc_info and "broker connection lost" in r.getMessage() + str(r.exc_info[1])]
+    assert crashes, "der Absturz muss mit Traceback geloggt werden"
+
+
+@pytest.mark.unit
+def test_event_listener_also_reconnects_when_capture_returns():
+    from unittest.mock import patch
+
+    from app.services import celery_event_listener as listener
+
+    outcomes = [None, None]
+
+    def listen_once():
+        if outcomes:
+            return outcomes.pop()
+        raise _StopListener
+
+    sleeps = []
+    with (
+        patch.object(listener, "_listen_once", listen_once),
+        patch.object(listener.time, "sleep", sleeps.append),
+        pytest.raises(_StopListener),
+    ):
+        listener.start_event_listener()
+
+    assert len(sleeps) == 2
+
+
+@pytest.mark.unit
+def test_event_listener_delay_is_capped():
+    from unittest.mock import patch
+
+    from app.services import celery_event_listener as listener
+
+    calls = []
+
+    def listen_once():
+        calls.append(1)
+        if len(calls) > 9:
+            raise _StopListener
+        raise RuntimeError("down")
+
+    sleeps = []
+    with (
+        patch.object(listener, "_listen_once", listen_once),
+        patch.object(listener.time, "sleep", sleeps.append),
+        pytest.raises(_StopListener),
+    ):
+        listener.start_event_listener()
+
+    assert max(sleeps) == 60.0
+    assert sleeps[:7] == [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0]
+
+
+@pytest.mark.unit
+def test_event_listener_delay_resets_after_a_healthy_connection():
+    """Hielt eine Verbindung lange, ist der nächste Abbruch ein neuer Vorfall,
+    kein weiterer Versuch derselben Störung."""
+    from unittest.mock import patch
+
+    from app.services import celery_event_listener as listener
+
+    # Je Durchlauf zwei Zeitstempel: Start und Ende. Der dritte Lauf hält 180 s.
+    clock = iter([0, 0.1, 10, 10.1, 20, 200, 210, 210.1, 300, 300.1])
+    runs = []
+
+    def listen_once():
+        runs.append(1)
+        if len(runs) > 4:
+            raise _StopListener
+        raise RuntimeError("down")
+
+    sleeps = []
+    with (
+        patch.object(listener, "_listen_once", listen_once),
+        patch.object(listener.time, "sleep", sleeps.append),
+        patch.object(listener.time, "monotonic", lambda: next(clock)),
+        pytest.raises(_StopListener),
+    ):
+        listener.start_event_listener()
+
+    assert sleeps == [1.0, 2.0, 1.0, 2.0]

@@ -23,6 +23,7 @@ import ast
 import json
 import logging
 import re
+import time
 from typing import Any
 
 from celery.events import EventReceiver
@@ -590,47 +591,83 @@ def _handle_lifecycle_event(event: dict, event_type: str, celery_task_id: str) -
         db.close()
 
 
-def start_event_listener():
+# Backoff between reconnect attempts, in seconds. A connection that held for at
+# least ``_RECONNECT_MAX_DELAY`` counts as healthy and resets the delay.
+_RECONNECT_MIN_DELAY = 1.0
+_RECONNECT_MAX_DELAY = 60.0
+
+
+def _handle_event(event: dict) -> None:
+    """Process one incoming Celery event."""
+    event_type = event.get('type')
+    celery_task_id = event.get('uuid')
+
+    # ----- Custom events from the worker (live progress/logs) -----
+    if event_type in ('task-progress', 'task-log'):
+        _handle_custom_event(event)
+        return
+
+    if not celery_task_id:
+        return
+
+    _handle_lifecycle_event(event, event_type, celery_task_id)
+
+
+def _listen_once() -> None:
+    """Hold one broker connection and process events until it ends.
+
+    ``capture`` blocks for as long as the connection lives, so this returns
+    (or raises) only when the connection is gone.
     """
-    Start listening to Celery events from RabbitMQ
-    This runs in a background thread/process
-    """
-    logger.info("Starting Celery event listener...")
-
-    def handle_event(event):
-        """Process incoming Celery events"""
-        event_type = event.get('type')
-        celery_task_id = event.get('uuid')
-
-        # ----- Custom events from the worker (live progress/logs) -----
-        if event_type in ('task-progress', 'task-log'):
-            _handle_custom_event(event)
-            return
-
-        if not celery_task_id:
-            return
-
-        _handle_lifecycle_event(event, event_type, celery_task_id)
-
-    # Connect to RabbitMQ and listen for events
     with celery_app.connection() as connection:
         recv = EventReceiver(
             connection,
             handlers={
-                'task-started': handle_event,
-                'task-succeeded': handle_event,
-                'task-failed': handle_event,
-                'task-revoked': handle_event,
+                'task-started': _handle_event,
+                'task-succeeded': _handle_event,
+                'task-failed': _handle_event,
+                'task-revoked': _handle_event,
                 # Custom events emitted by the worker for live progress
                 # and per-line log tail. Routed to the same handler;
                 # branched at the top.
-                'task-progress': handle_event,
-                'task-log': handle_event,
+                'task-progress': _handle_event,
+                'task-log': _handle_event,
             }
         )
 
         logger.info("Celery event listener ready, waiting for events...")
         recv.capture(limit=None, timeout=None, wakeup=True)
+
+
+def start_event_listener() -> None:
+    """Listen to Celery events from RabbitMQ, reconnecting when the link drops.
+
+    This runs in a background thread and never returns. It used to open the
+    connection once; when RabbitMQ restarted or the network blinked, the thread
+    ended with an exception nobody saw and the backend received no task events
+    until it was restarted itself.
+    """
+    logger.info("Starting Celery event listener...")
+    delay = _RECONNECT_MIN_DELAY
+    while True:
+        started = time.monotonic()
+        failure: Exception | None = None
+        try:
+            _listen_once()
+        except Exception as exc:
+            failure = exc
+        if time.monotonic() - started >= _RECONNECT_MAX_DELAY:
+            delay = _RECONNECT_MIN_DELAY
+        if failure is None:
+            logger.warning("Celery event listener stopped; reconnecting in %.0fs", delay)
+        else:
+            logger.error(
+                "Celery event listener lost its connection; reconnecting in %.0fs",
+                delay,
+                exc_info=failure,
+            )
+        time.sleep(delay)
+        delay = min(delay * 2, _RECONNECT_MAX_DELAY)
 
 
 if __name__ == "__main__":
