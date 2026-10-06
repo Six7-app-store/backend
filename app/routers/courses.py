@@ -238,6 +238,10 @@ def add_course_members(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Course not found"
         )
+    # Membership decides who may inspect a user's deployments (see
+    # ``can_view_deployment_owner``), so it is gated like edit/delete:
+    # course-teacher of THIS course or admin, not any teacher.
+    ensure_edit_course(current_user, course, db)
 
     crud_courses.add_users_to_course(db, course_id, payload.userIds)
     return crud_courses.get_course_members(db, course_id)
@@ -264,6 +268,9 @@ def remove_course_member(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Course not found"
         )
+    # Same gate as ``add_course_members``: only a course-teacher of this
+    # course or an admin may change who belongs to it.
+    ensure_edit_course(current_user, course, db)
 
     removed = crud_courses.remove_user_from_course(db, course_id, user_id)
     if not removed:

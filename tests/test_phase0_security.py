@@ -180,3 +180,52 @@ def test_tasks_allowed_to_admin(db):
         assert c.get(f"/tasks/{task.taskId}").status_code == 200
 
 
+# ================================================================
+# A-02 · Kursmitglieder verwalten nur Kurs-Lehrkräfte und Admins
+# ================================================================
+@pytest.mark.integration
+def test_add_course_members_denied_to_unassigned_teacher(db):
+    """A-02: Jede Lehrkraft durfte beliebige Nutzer in beliebige Kurse schieben.
+    Die Kurszugehörigkeit steuert, wer Deployments einsehen darf."""
+    course = _course(db)
+    other = _course(db)
+    outsider = _user(db, UserRole.TEACHER)
+    _teach(db, other, outsider)  # Lehrkraft, aber von einem anderen Kurs
+    victim = _user(db, UserRole.STUDENT)
+
+    with as_user(outsider) as c:
+        r = c.post(f"/courses/{course.courseId}/users", json={"userIds": [str(victim.userId)]})
+
+    assert r.status_code == 403
+    db.expire_all()
+    assert db.get(User, victim.userId).courseId is None
+
+
+@pytest.mark.integration
+def test_remove_course_member_denied_to_unassigned_teacher(db):
+    course = _course(db)
+    outsider = _user(db, UserRole.TEACHER)
+    member = _user(db, UserRole.STUDENT, course=course)
+
+    with as_user(outsider) as c:
+        r = c.delete(f"/courses/{course.courseId}/users/{member.userId}")
+
+    assert r.status_code == 403
+    db.expire_all()
+    assert db.get(User, member.userId).courseId == course.courseId
+
+
+@pytest.mark.integration
+def test_course_members_can_be_managed_by_admin(db):
+    course = _course(db)
+    admin = _user(db, UserRole.ADMIN)
+    student = _user(db, UserRole.STUDENT)
+
+    with as_user(admin) as c:
+        add = c.post(f"/courses/{course.courseId}/users", json={"userIds": [str(student.userId)]})
+        rem = c.delete(f"/courses/{course.courseId}/users/{student.userId}")
+
+    assert add.status_code == 200
+    assert rem.status_code == 204
+
+
