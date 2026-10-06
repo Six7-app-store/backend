@@ -60,13 +60,14 @@ def submit_version(
 
 
 def get_pending_approvals(db: Session) -> list[AppVersionApproval]:
-    """Return all PENDING version approvals for public apps, oldest first."""
+    """Return all PENDING version approvals for live public apps, oldest first."""
     return (
         db.query(AppVersionApproval)
         .join(App, App.appId == AppVersionApproval.appId)
         .filter(
             AppVersionApproval.status == AppVersionApprovalStatus.PENDING,
             App.is_private.is_(False),
+            App.deleted_at.is_(None),
         )
         .order_by(AppVersionApproval.created_at.asc())
         .all()

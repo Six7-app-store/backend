@@ -144,6 +144,13 @@ def deactivate_app(
 
     _require_app(db, app_id)
     updated = crud_apps.update_app(db, app_id, AppUpdate(is_private=True))
+    if updated is None:
+        # ``_require_app`` also finds soft-deleted apps, ``update_app`` does not.
+        # There is nothing left to take out of the store.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="App not found",
+        )
     return _serialize_app(updated)
 
 

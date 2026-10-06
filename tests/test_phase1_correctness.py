@@ -766,3 +766,72 @@ def test_unmarked_tests_get_their_lane_from_the_directory():
     assert any(n.startswith("tests/unit/test_email_service.py") for n in unit)
     assert not any(n.startswith("tests/unit/") for n in integration)
     assert any(n.startswith("tests/test_lti_launch.py") for n in integration)
+
+
+# ================================================================
+# B-18 · Gelöschte Apps gehören nicht in die Admin-Warteschlange
+# ================================================================
+def _soft_deleted_app_with_pending_version(db, owner):
+    import datetime as dt
+    import uuid
+
+    from app.models import AppVersionApproval, AppVersionApprovalStatus
+    from tests.test_phase0_security import _app
+
+    app = _app(db, owner)
+    db.add(AppVersionApproval(
+        approvalId=uuid.uuid4(), appId=app.appId, version_tag="v1",
+        status=AppVersionApprovalStatus.PENDING,
+    ))
+    app.deleted_at = dt.datetime(2026, 1, 1)
+    db.commit()
+    return app
+
+
+@pytest.mark.integration
+def test_pending_queue_skips_deleted_apps(db):
+    """B-18: ``get_pending_approvals`` filterte auf öffentliche Apps, nicht auf
+    gelöschte; eine gelöschte App blieb mit ihrer offenen Version in der Liste."""
+    from app.models import UserRole
+    from tests.test_phase0_security import _app, _user, as_user
+
+    admin = _user(db, UserRole.ADMIN)
+    owner = _user(db, UserRole.TEACHER)
+    _soft_deleted_app_with_pending_version(db, owner)
+    live = _app(db, owner)
+    _add_pending(db, live)
+
+    with as_user(admin) as c:
+        r = c.get("/admin/apps/versions/pending")
+
+    assert r.status_code == 200
+    assert [row["appId"] for row in r.json()] == [str(live.appId)]
+
+
+def _add_pending(db, app):
+    import uuid
+
+    from app.models import AppVersionApproval, AppVersionApprovalStatus
+
+    db.add(AppVersionApproval(
+        approvalId=uuid.uuid4(), appId=app.appId, version_tag="v1",
+        status=AppVersionApprovalStatus.PENDING,
+    ))
+    db.commit()
+
+
+@pytest.mark.integration
+def test_deactivating_a_deleted_app_is_a_404_not_a_500(db):
+    """B-18: ``_require_app`` lädt auch gelöschte Apps, ``update_app`` nicht.
+    Es kam ``None`` zurück, und die Antwortvalidierung machte daraus ein 500."""
+    from app.models import UserRole
+    from tests.test_phase0_security import _user, as_user
+
+    admin = _user(db, UserRole.ADMIN)
+    owner = _user(db, UserRole.TEACHER)
+    app = _soft_deleted_app_with_pending_version(db, owner)
+
+    with as_user(admin) as c:
+        r = c.put(f"/admin/apps/{app.appId}")
+
+    assert r.status_code == 404
