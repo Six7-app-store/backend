@@ -1,3 +1,4 @@
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -18,6 +19,8 @@ from app.utils.keycloak_auth import (
 from app.utils.permissions import (
     require_staff,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -114,8 +117,18 @@ def search_users_keycloak(
     keycloak_users = search_keycloak_users(query, limit)
     results = []
     for kc_user in keycloak_users:
-        # Create/update the user in the local DB
-        db_user = sync_user_from_keycloak(db, kc_user)
+        # Create/update the user in the local DB. A hit carries no roles, so
+        # this never changes the role of an existing account. It also carries
+        # no ``email_verified``, so an address that already belongs to a local
+        # account (e.g. one created by an LTI launch) is refused with 403;
+        # that must skip this hit, not abort the whole search.
+        try:
+            db_user = sync_user_from_keycloak(db, kc_user)
+        except HTTPException as exc:
+            logger.info(
+                "Skipping Keycloak search hit %s: %s", kc_user.get("id"), exc.detail
+            )
+            continue
         results.append({
             "userId": db_user.userId,
             "email": db_user.email,

@@ -142,13 +142,21 @@ def sync_user_from_keycloak(db: Session, keycloak_user_data: dict) -> User:
     Creates the user if missing, updates role/name if changed.
     Expects keys: id (or sub), username, email, roles (or realm_access.roles),
     firstName/given_name, lastName/family_name.
+
+    A payload that carries neither ``roles`` nor ``realm_access`` says nothing
+    about the user's roles (a Keycloak user-search hit is like that), so the role
+    of an existing account is left alone. Only a payload that does carry roles —
+    even an empty list — is allowed to change it; a new account without any role
+    information starts as STUDENT.
     """
     keycloak_id = keycloak_user_data.get("id") or keycloak_user_data.get("sub")
     email = keycloak_user_data.get("email")
     username = keycloak_user_data.get("username") or keycloak_id
+    roles_known = "roles" in keycloak_user_data or "realm_access" in keycloak_user_data
     keycloak_roles = (
         keycloak_user_data.get("roles")
-        or keycloak_user_data.get("realm_access", {}).get("roles", [])
+        or (keycloak_user_data.get("realm_access") or {}).get("roles")
+        or []
     )
     app_role = map_keycloak_roles_to_app_role(keycloak_roles)
     first_name = keycloak_user_data.get("firstName") or keycloak_user_data.get("given_name")
@@ -226,7 +234,7 @@ def sync_user_from_keycloak(db: Session, keycloak_user_data: dict) -> User:
     if username and user.username != username:
         user.username = username
         updated = True
-    if user.role != app_role:
+    if roles_known and user.role != app_role:
         user.role = app_role
         updated = True
     if first_name and user.firstName != first_name:

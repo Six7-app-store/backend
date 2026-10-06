@@ -8,6 +8,7 @@ import json
 import logging
 import uuid
 from contextlib import contextmanager
+from unittest.mock import patch
 
 import pytest
 
@@ -227,5 +228,69 @@ def test_course_members_can_be_managed_by_admin(db):
 
     assert add.status_code == 200
     assert rem.status_code == 204
+
+
+# ================================================================
+# A-06 · Die Nutzersuche darf Rollen nicht ändern und nicht abbrechen
+# ================================================================
+@pytest.mark.unit
+def test_sync_without_roles_keeps_existing_role(db):
+    """A-06: Ein Keycloak-Suchtreffer trägt keine Rollen. ``sync`` mappte das
+    auf ``student`` und stufte Lehrkräfte und Admins herab."""
+    from app.utils.keycloak_auth import sync_user_from_keycloak
+
+    teacher = _user(db, UserRole.TEACHER, keycloak_id="kc-teacher")
+    search_hit = {
+        "id": "kc-teacher",
+        "username": teacher.username,
+        "email": teacher.email,
+        "firstName": "T",
+        "lastName": "X",
+        "enabled": True,
+    }
+
+    sync_user_from_keycloak(db, search_hit)
+
+    db.expire_all()
+    assert db.get(User, teacher.userId).role == UserRole.TEACHER
+
+
+@pytest.mark.unit
+def test_sync_with_roles_still_updates_role(db):
+    """Gegenprobe: Mit Rollen im Token gilt weiter Keycloak als Quelle."""
+    from app.utils.keycloak_auth import sync_user_from_keycloak
+
+    user = _user(db, UserRole.STUDENT, keycloak_id="kc-up")
+    sync_user_from_keycloak(
+        db,
+        {"id": "kc-up", "username": user.username, "email": user.email, "roles": ["teacher"]},
+    )
+
+    db.expire_all()
+    assert db.get(User, user.userId).role == UserRole.TEACHER
+
+
+@pytest.mark.integration
+def test_user_search_does_not_demote_and_survives_unverified_email(db):
+    """A-06: Ein Treffer, dessen E-Mail lokal schon existiert (z. B. LTI-Konto
+    ohne ``keycloak_id``), ließ die ganze Suche mit 403 scheitern."""
+    searcher = _user(db, UserRole.TEACHER)
+    known = _user(db, UserRole.TEACHER, keycloak_id="kc-known")
+    lti_only = _user(db, UserRole.STUDENT, email="lti-only@example.com")  # ohne keycloak_id
+
+    def hit(kid, user):
+        return {"id": kid, "username": user.username, "email": user.email,
+                "firstName": "A", "lastName": "B", "enabled": True}
+
+    hits = [hit("kc-known", known), hit("kc-lti", lti_only)]
+    with (
+        patch("app.routers.users.search_keycloak_users", return_value=hits),
+        as_user(searcher) as c,
+    ):
+        r = c.get("/users/search", params={"query": "ab"})
+
+    assert r.status_code == 200, r.text
+    db.expire_all()
+    assert db.get(User, known.userId).role == UserRole.TEACHER
 
 
