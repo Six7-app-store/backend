@@ -616,3 +616,107 @@ def test_event_listener_delay_resets_after_a_healthy_connection():
         listener.start_event_listener()
 
     assert sleeps == [1.0, 2.0, 1.0, 2.0]
+
+
+# ================================================================
+# B-23 · Modell und Migrationen beschreiben dieselbe Datenbank
+# ================================================================
+@pytest.mark.unit
+def test_models_declare_the_partial_indexes():
+    """B-23: ``uq_tasks_active_per_deployment``, ``ix_deployments_live`` und
+    ``ix_apps_live`` standen nur in Migrationen. Die Migration ``73fd123a60aa``
+    hat sie per Autogenerate gelöscht, weil das Modell sie nicht kannte."""
+    from app.models import App, Deployment, Task
+
+    def indexes(model):
+        return {i.name: i for i in model.__table__.indexes}
+
+    active = indexes(Task)["uq_tasks_active_per_deployment"]
+    assert active.unique
+    assert [c.name for c in active.columns] == ["deploymentId"]
+    assert "PENDING" in str(active.dialect_options["postgresql"]["where"])
+
+    assert not indexes(Deployment)["ix_deployments_live"].unique
+    assert not indexes(App)["ix_apps_live"].unique
+
+
+@pytest.mark.integration
+def test_a_second_active_task_is_rejected_by_the_database(db):
+    """B-23: In der Praxis fehlte der Index, die Race-Absicherung in
+    ``prepare_task_in_tx`` (``IntegrityError`` -> ``ActiveTaskExistsError``)
+    war toter Code. Das Vorab-Lesen wird hier ausgeschaltet, als hätten zwei
+    Anfragen es gleichzeitig bestanden."""
+    import uuid
+    from unittest.mock import patch
+
+    from app.models import Task, TaskStatus, TaskType, UserRole
+    from app.services import task_service
+    from tests.test_phase0_security import _app, _deployment, _user
+
+    owner = _user(db, UserRole.TEACHER)
+    dep = _deployment(db, owner, _app(db, owner))
+    db.add(Task(taskId=uuid.uuid4(), deploymentId=dep.deploymentId, celeryTaskId="a",
+                type=TaskType.DEPLOY, status=TaskStatus.RUNNING))
+    db.commit()
+
+    with patch.object(task_service.crud_tasks, "get_tasks", return_value=[]), pytest.raises(
+        task_service.ActiveTaskExistsError
+    ):
+        task_service.prepare_task_in_tx(db, dep.deploymentId, TaskType.PAUSE)
+
+
+@pytest.mark.integration
+def test_migrations_build_the_same_schema_as_the_models():
+    """B-23: Die Testdatenbank entsteht per ``create_all``, nicht per Alembic;
+    ein Fehler in den Migrationen fiel nie auf. Dieser Test fährt alle
+    Migrationen auf eine leere Datenbank und lässt Alembic gegen die Modelle
+    vergleichen (``alembic check``)."""
+    import os
+    import subprocess
+    import sys
+    import uuid
+    from pathlib import Path
+
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.engine import make_url
+
+    from tests.conftest import _TEST_DB_URL
+
+    name = f"alembic_check_{uuid.uuid4().hex[:8]}"
+    base = make_url(_TEST_DB_URL)
+    admin = create_engine(base.set(database="postgres"), isolation_level="AUTOCOMMIT")
+    with admin.connect() as conn:
+        conn.execute(text(f'CREATE DATABASE "{name}"'))
+    url = base.set(database=name).render_as_string(hide_password=False)
+    root = Path(__file__).resolve().parents[1]
+    env = {**os.environ, "DATABASE_URL": url}
+
+    def alembic(*args):
+        return subprocess.run(
+            [sys.executable, "-m", "alembic", *args],
+            cwd=root, env=env, capture_output=True, text=True, timeout=240,
+        )
+
+    try:
+        upgrade = alembic("upgrade", "head")
+        assert upgrade.returncode == 0, upgrade.stderr[-2000:]
+
+        engine = create_engine(url)
+        with engine.connect() as conn:
+            present = {r[0] for r in conn.execute(text(
+                "select indexname from pg_indexes where indexname in "
+                "('uq_tasks_active_per_deployment','ix_deployments_live','ix_apps_live')"
+            ))}
+        engine.dispose()
+        assert present == {
+            "uq_tasks_active_per_deployment", "ix_deployments_live", "ix_apps_live",
+        }
+
+        check = alembic("check")
+        assert check.returncode == 0, check.stdout[-2000:] + check.stderr[-2000:]
+        heads = alembic("heads")
+        assert len(heads.stdout.strip().splitlines()) == 1, heads.stdout
+    finally:
+        with admin.connect() as conn:
+            conn.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        admin.dispose()

@@ -7,11 +7,13 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Integer,
     LargeBinary,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
@@ -153,6 +155,13 @@ class App(Base):
     # valid. Soft-delete is refused while the app has live deployments.
     deleted_at = Column(DateTime, nullable=True)
 
+    # Partial index for "live rows only" lookups. It has to be declared here:
+    # an index the model does not know is dropped by the next autogenerate,
+    # which is how migration 73fd123a60aa removed it once already.
+    __table_args__ = (
+        Index("ix_apps_live", "appId", postgresql_where=text("deleted_at IS NULL")),
+    )
+
     # Relationships
     user = relationship("User", back_populates="apps")
     deployments = relationship("Deployment", back_populates="app")
@@ -181,6 +190,14 @@ class Deployment(Base):
     # allowed in terminal states, so OpenStack resources are already
     # gone by the time this is set.
     deleted_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index(
+            "ix_deployments_live",
+            "deploymentId",
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+    )
 
     # Relationships
     user = relationship("User", back_populates="deployments")
@@ -232,6 +249,19 @@ class Task(Base):
     current_phase = Column(String(50), nullable=True)
     progress_pct = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=utcnow)
+
+    # At most one PENDING/RUNNING task per deployment. The database enforces it;
+    # ``task_service.prepare_task_in_tx`` turns the violation into
+    # ``ActiveTaskExistsError``. The labels are the enum member NAMES, which is
+    # what SQLAlchemy stores for ``Enum(TaskStatus)``.
+    __table_args__ = (
+        Index(
+            "uq_tasks_active_per_deployment",
+            "deploymentId",
+            unique=True,
+            postgresql_where=text("status IN ('PENDING', 'RUNNING')"),
+        ),
+    )
 
     # Relationships
     deployment = relationship("Deployment", back_populates="tasks")

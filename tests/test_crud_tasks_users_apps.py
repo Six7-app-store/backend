@@ -160,7 +160,9 @@ def test_get_tasks_filters_by_deployment_celery_and_status(db):
             "deploymentId": dep_a.deploymentId,
             "celeryTaskId": "cel-1",
             "type": TaskType.DEPLOY,
-            "status": TaskStatus.PENDING,
+            # Finished: the database allows one PENDING/RUNNING task per
+            # deployment (uq_tasks_active_per_deployment), t2 below is it.
+            "status": TaskStatus.SUCCESS,
         },
     )
     t2 = tasks_crud.create_task(
