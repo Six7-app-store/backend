@@ -111,6 +111,10 @@ class AppVariableResponse(BaseModel):
     # Closed value set read from ``validation { condition = contains([...],
     # var.x) }``; the wizard renders a dropdown instead of free text.
     allowedValues: list[Any] | None = None
+    # Inclusive bounds read from ``validation { condition = var.x >= 1 &&
+    # var.x <= 9 }``; the wizard sets them as ``min``/``max`` on the input.
+    minValue: int | float | None = None
+    maxValue: int | float | None = None
     markerError: _MarkerErrorPayload | None = None
 
 
@@ -965,6 +969,50 @@ def _allowed_values(var_name: str, var_block: str) -> list[Any] | None:
     return values
 
 
+_NUMBER_LITERAL = r"(-?\d+(?:\.\d+)?)"
+
+
+def _number_range(
+    var_name: str, var_block: str
+) -> tuple[int | float | None, int | float | None]:
+    """Inclusive bounds of a number variable from its ``validation`` block.
+
+    Recognises the range idiom, in either operand order::
+
+        validation {
+          condition     = var.disk_gb >= 0 && var.disk_gb <= 200
+          error_message = "..."
+        }
+
+    Only ``>=``/``<=`` against a number literal count. A strict ``>``
+    or ``<`` has no exact counterpart in the wizard's ``min``/``max`` for
+    non-integers, and a bound referring to a local is not knowable here;
+    both leave OpenTofu as the only check. Returns ``(None, None)`` when
+    the block has no such bound.
+    """
+    var = r"var\." + re.escape(var_name) + r"\b"
+    lower = upper = None
+
+    def _num(raw: str) -> int | float:
+        value = float(raw)
+        return int(value) if value.is_integer() else value
+
+    for pattern, is_lower in (
+        (var + r"\s*>=\s*" + _NUMBER_LITERAL, True),
+        (_NUMBER_LITERAL + r"\s*<=\s*" + var, True),
+        (var + r"\s*<=\s*" + _NUMBER_LITERAL, False),
+        (_NUMBER_LITERAL + r"\s*>=\s*" + var, False),
+    ):
+        match = re.search(pattern, var_block)
+        if not match:
+            continue
+        if is_lower:
+            lower = _num(match.group(1))
+        else:
+            upper = _num(match.group(1))
+    return lower, upper
+
+
 def _parse_one_variable(
     *,
     var_name: str,
@@ -1014,11 +1062,17 @@ def _parse_one_variable(
     }
 
     # A closed value set turns the free-text input into a dropdown. It
-    # coexists with markers; the wizard gives the resource picker
-    # precedence when both are present.
+    # coexists with markers: on an ``@openstack`` variable the resource
+    # picker offers only these values, e.g. the flavors an app allows.
     allowed = _allowed_values(var_name, var_block)
     if allowed is not None:
         var_info["allowedValues"] = allowed
+
+    lower, upper = _number_range(var_name, var_block)
+    if lower is not None:
+        var_info["minValue"] = lower
+    if upper is not None:
+        var_info["maxValue"] = upper
 
     # Evaluate @openstack markers. Per-variable try/except: a typo in ONE
     # variable description must not block the whole wizard; the error
