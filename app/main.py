@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api_docs import API_DESCRIPTION, OPENAPI_TAGS
 from app.config import settings
 from app.routers import (
     admin_apps,
@@ -99,9 +100,10 @@ async def lifespan(app: FastAPI):
 # FASTAPI APP
 # ----------------------------------------------------------------
 app = FastAPI(
-    title="Backend API",
-    description="FastAPI Backend with Auth, Git & Celery Integration",
+    title="Click-n-Deploy App Store API",
+    description=API_DESCRIPTION,
     version="1.0.0",
+    openapi_tags=OPENAPI_TAGS,
     lifespan=lifespan
 )
 
@@ -146,8 +148,9 @@ app.include_router(
 # ----------------------------------------------------------------
 # HEALTH CHECK
 # ----------------------------------------------------------------
-@app.get("/health")
+@app.get("/health", tags=["Health"])
 def health_check():
+    """Liveness probe. Answers without authentication and without touching the database."""
     return {
         "status": "healthy",
         "service": "backend-api",

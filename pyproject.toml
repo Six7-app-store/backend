@@ -39,6 +39,12 @@ python-keycloak = ">=3.9.1"
 # stays for the Keycloak path, so both JWT libraries are installed.
 pylti1p3 = "^2.0.0"
 requests = ">=2.31.0"
+# Transitive via requests/openstacksdk. Pinned to >=2.8.0 to close
+# PYSEC-2026-4175/4176/4177 (all HIGH). Fixed in 2.8.0.
+urllib3 = ">=2.8.0"
+# Transitive via pylti1p3. Pinned to >=2.15.0 to close PYSEC-2026-4141.
+# Fixed in 2.15.0.
+pyjwt = ">=2.15.0"
 openstacksdk = "^3.3.0"
 cryptography = ">=42.0.0"
 PyYAML = ">=6.0"

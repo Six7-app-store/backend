@@ -277,6 +277,7 @@ def list_security_groups(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """Lists the security groups in the user's project."""
     def fetch() -> list[dict]:
         with openstack_client.user_connection(db, current_user) as conn:
             return [
@@ -359,6 +360,7 @@ def list_routers(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """Lists the routers in the user's project, with their external gateway."""
     def fetch() -> list[dict]:
         with openstack_client.user_connection(db, current_user) as conn:
             return [

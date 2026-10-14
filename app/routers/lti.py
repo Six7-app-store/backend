@@ -194,7 +194,11 @@ def lti_jwks() -> dict:
 # ----------------------------------------------------------------
 # LOGIN INITIATION
 # ----------------------------------------------------------------
-@router.api_route("/login", methods=["GET", "POST"])
+# One route per verb, each with its own operation id: a single
+# ``api_route`` with both methods gives them the same id, which breaks
+# the OpenAPI schema for client generators.
+@router.get("/login", operation_id="lti_login_get")
+@router.post("/login", operation_id="lti_login_post")
 async def lti_login(request: StarletteRequest) -> Response:
     """Step 1: start the OIDC handshake and redirect back to Moodle.
 

@@ -25,7 +25,6 @@ router = APIRouter()
 @router.get(
     "/apps/versions/pending",
     response_model=list[AppVersionApprovalWithApp],
-    tags=["Admin"],
 )
 def list_pending_versions(
     db: Session = Depends(get_db),
@@ -41,7 +40,6 @@ def list_pending_versions(
 @router.post(
     "/apps/{app_id}/versions/{version_tag}/approve",
     response_model=AppVersionApprovalResponse,
-    tags=["Admin"],
 )
 def approve_version(
     app_id: UUID,
@@ -89,7 +87,6 @@ def approve_version(
 @router.post(
     "/apps/{app_id}/versions/{version_tag}/reject",
     response_model=AppVersionApprovalResponse,
-    tags=["Admin"],
 )
 def reject_version(
     app_id: UUID,
@@ -111,7 +108,6 @@ def reject_version(
 @router.post(
     "/apps/{app_id}/versions/{version_tag}/revoke",
     response_model=AppVersionApprovalResponse,
-    tags=["Admin"],
 )
 def revoke_version(
     app_id: UUID,
@@ -131,7 +127,6 @@ def revoke_version(
 @router.put(
     "/apps/{app_id}",
     response_model=AppResponse,
-    tags=["Admin"],
 )
 def deactivate_app(
     app_id: UUID,
