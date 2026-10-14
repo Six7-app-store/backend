@@ -16,10 +16,10 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 
+import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from jose import jwt
 from pylti1p3.registration import Registration
 from pylti1p3.tool_config import ToolConfDict
 
