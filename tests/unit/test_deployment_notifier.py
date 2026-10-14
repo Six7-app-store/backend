@@ -424,6 +424,23 @@ def test_connect_string_per_protocol():
 
 
 @pytest.mark.unit
+def test_connect_string_brackets_ipv6():
+    """A bare IPv6 needs brackets before ``:port``; an app that already
+    brackets it must not end up with two pairs. ssh takes the bare address."""
+    v6 = {"ip": "2001:db8::42", "username": "luca"}
+    assert deployment_notifier._connect_string("ssh", v6, None) == "ssh luca@2001:db8::42"
+    assert deployment_notifier._connect_string("rdp", v6, None) == "[2001:db8::42]:3389"
+    assert (
+        deployment_notifier._connect_string("rdp", {"ip": "[2001:db8::42]"}, None)
+        == "[2001:db8::42]:3389"
+    )
+    assert (
+        deployment_notifier._connect_string("web", {**v6, "port": 8080}, None)
+        == "http://[2001:db8::42]:8080"
+    )
+
+
+@pytest.mark.unit
 def test_connect_string_is_none_when_unusable():
     """No half-built lines: an incomplete account or an app that ships
     no endpoint yields ``None`` so the mail leaves the row out."""

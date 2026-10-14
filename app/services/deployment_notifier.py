@@ -215,6 +215,17 @@ def _resolve_protocol(raw: dict[str, Any], *, has_team_url: bool = False) -> str
     return "ssh"
 
 
+def _host_for_port(ip: str) -> str:
+    """Wrap a bare IPv6 address in brackets so ``host:port`` stays parseable.
+
+    ``2001:db8::1:3389`` is ambiguous, ``[2001:db8::1]:3389`` is not. IPv4
+    and already bracketed addresses pass through unchanged.
+    """
+    if ":" in ip and not ip.startswith("["):
+        return f"[{ip}]"
+    return ip
+
+
 def _connect_string(protocol: str, raw: dict[str, Any], url: str | None) -> str | None:
     """Build the one line a user can copy to reach their machine.
 
@@ -236,9 +247,9 @@ def _connect_string(protocol: str, raw: dict[str, Any], url: str | None) -> str 
         if not ip:
             return None
         default_port = 3389 if protocol == "rdp" else 5900
-        return f"{ip}:{port or default_port}"
+        return f"{_host_for_port(ip)}:{port or default_port}"
     if protocol == "web":
-        return url or (f"http://{ip}:{port}" if ip and port else None)
+        return url or (f"http://{_host_for_port(ip)}:{port}" if ip and port else None)
     return None
 
 
