@@ -20,8 +20,9 @@ import typing as t
 from datetime import timedelta
 from uuid import UUID
 
+import jwt
 from fastapi import HTTPException, status
-from jose import JWTError, jwt
+from jwt import InvalidTokenError
 
 from app.config import settings
 from app.utils.time import utcnow
@@ -194,7 +195,7 @@ def _decode(token: str, secret: str, what: str, rejected=_session_rejected) -> d
             issuer=SESSION_ISSUER,
             options={"verify_aud": False},
         )
-    except JWTError as e:
+    except InvalidTokenError as e:
         logger.info("%s rejected: %s", what, e)
         raise rejected() from e
 
