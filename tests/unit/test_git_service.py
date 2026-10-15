@@ -192,3 +192,42 @@ def test_clone_repository_authentication_failure_propagates(
     # Original cause ist via __cause__ erreichbar (raise ... from e)
     assert excinfo.value.__cause__ is auth_error
     assert "Authentication failed" in str(excinfo.value.__cause__)
+
+
+# ----------------------------------------------------------------
+# SSRF guard — _assert_safe_git_url / _get_authenticated_url
+# ----------------------------------------------------------------
+class TestSsrfGuard:
+    """_get_authenticated_url must reject private-IP destinations before
+    injecting the access token, regardless of how the URL is written."""
+
+    def test_private_ipv4_loopback_blocked(self, tmp_path, monkeypatch):
+        svc = _service(tmp_path, monkeypatch)
+        with pytest.raises(ValueError, match="private address"):
+            svc._get_authenticated_url("https://127.0.0.1/owner/repo.git")
+
+    def test_private_rfc1918_10_blocked(self, tmp_path, monkeypatch):
+        svc = _service(tmp_path, monkeypatch)
+        with pytest.raises(ValueError, match="private address"):
+            svc._get_authenticated_url("https://10.0.0.1/owner/repo.git")
+
+    def test_private_rfc1918_192_168_blocked(self, tmp_path, monkeypatch):
+        svc = _service(tmp_path, monkeypatch)
+        with pytest.raises(ValueError, match="private address"):
+            svc._get_authenticated_url("https://192.168.1.50/owner/repo.git")
+
+    def test_link_local_blocked(self, tmp_path, monkeypatch):
+        svc = _service(tmp_path, monkeypatch)
+        with pytest.raises(ValueError, match="private address"):
+            svc._get_authenticated_url("https://169.254.169.254/latest/meta-data/")
+
+    def test_public_github_allowed(self, tmp_path, monkeypatch):
+        svc = _service(tmp_path, monkeypatch)
+        # Should not raise; token should be injected
+        result = svc._get_authenticated_url("https://github.com/owner/repo.git")
+        assert "test-token-xyz@github.com" in result
+
+    def test_public_gitlab_allowed(self, tmp_path, monkeypatch):
+        svc = _service(tmp_path, monkeypatch)
+        result = svc._get_authenticated_url("https://gitlab.com/owner/repo.git")
+        assert "test-token-xyz@gitlab.com" in result

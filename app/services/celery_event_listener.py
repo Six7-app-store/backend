@@ -19,9 +19,11 @@ The custom events carry ``deployment_id`` directly in the payload so the
 listener doesn't need a Postgres roundtrip on the hot path.
 """
 
+import ast
 import json
 import logging
 import re
+import time
 from typing import Any
 
 from celery.events import EventReceiver
@@ -306,41 +308,58 @@ def _handle_task_succeeded(celery_task_id: str) -> tuple[dict, Any]:
     return update_data, outputs
 
 
+# ``Failure('<payload>')`` as the worker renders it: ``Failure.__repr__`` is
+# ``Failure({args[0]!r})``, so the argument is a complete Python string literal
+# (single- or double-quoted, with backslash escapes). Matching the literal as a
+# whole, instead of "up to the first ``')``", keeps a ``')`` inside the payload
+# from cutting it short.
+_FAILURE_REPR_RE = re.compile(
+    r"""Failure\((?P<arg>'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")\)""",
+    re.DOTALL,
+)
+_FAILURE_BARE_RE = re.compile(r"Failure:\s*(\{.+?\})\s*$", re.DOTALL)
+
+
 def _parse_structured_failure(exception_type: Any, traceback: str) -> dict | None:
     """Extract the worker's structured ``Failure`` JSON payload, if present.
 
     The worker raises ``Failure`` whose ``args[0]`` is a JSON payload
     with logs/tf_state/etc. It can surface in two forms:
 
-     1. ``Failure: {"error": ...}`` in the traceback's final line, and
-        ``Failure('{"error": ...}')`` in ``event['exception']``.
-     2. ``Failure('...')`` literally inside the traceback.
+     1. ``Failure('<json>')``, the ``repr()`` of the exception, in
+        ``event['exception']`` or inside the traceback;
+     2. ``Failure: {"error": ...}`` in the traceback's final line.
 
     Searches the exception field first, then the traceback. Returns the
     decoded dict, or ``None`` when no structured payload could be parsed.
+
+    The ``repr()`` form is decoded with ``ast.literal_eval`` — the inverse of
+    ``repr`` for a string — so umlauts and escapes come back unchanged. The
+    previous ``encode('utf-8').decode('unicode_escape')`` read UTF-8 bytes as
+    Latin-1 and turned ``Schlüssel`` into ``SchlÃ¼ssel``.
     """
-    candidates = [str(exception_type or ''), traceback or '']
-    for haystack in candidates:
+    for haystack in (str(exception_type or ""), traceback or ""):
         if not haystack:
             continue
-        # Match ``Failure('<json>')`` or ``Failure: <json>``.
-        match = (
-            re.search(r"Failure\('(.+?)'\)", haystack, re.DOTALL)
-            or re.search(r"Failure:\s*(\{.+?\})\s*$", haystack, re.DOTALL)
-        )
-        if not match:
-            continue
-        json_str = match.group(1)
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            # The repr() form escapes embedded quotes; decode once.
+        candidates: list[str] = []
+        repr_match = _FAILURE_REPR_RE.search(haystack)
+        if repr_match:
             try:
-                return json.loads(
-                    json_str.encode('utf-8').decode('unicode_escape')
-                )
-            except (json.JSONDecodeError, UnicodeDecodeError):
+                literal = ast.literal_eval(repr_match.group("arg"))
+            except (ValueError, SyntaxError):
+                literal = None
+            if isinstance(literal, str):
+                candidates.append(literal)
+        bare_match = _FAILURE_BARE_RE.search(haystack)
+        if bare_match:
+            candidates.append(bare_match.group(1))
+        for text in candidates:
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
                 continue
+            if isinstance(data, dict):
+                return data
     return None
 
 
@@ -430,13 +449,15 @@ def _handle_task_failed(celery_task_id: str, event: dict) -> tuple[dict, str | N
             # build, etc.).
             failure_kind = "worker_failure"
             _apply_structured_failure(update_data, failure_data)
-            logger.info(f"[FAILED] Extracted structured failure data for {celery_task_id}: {update_data}")
+            # Never log ``update_data`` here: it carries ``tf_state`` and
+            # ``outputs``, i.e. the passwords of the provisioned machines.
+            logger.info("[FAILED] Extracted structured failure data for %s", celery_task_id)
         else:
             raise ValueError("Not structured failure format")
     except Exception as parse_error:
         logger.warning(f"Could not parse structured failure: {parse_error}")
         failure_kind = _apply_infra_failure(update_data, exception_type, traceback)
-    logger.info(f"[FAILED] Update data for {celery_task_id}: {update_data}")
+    logger.info("[FAILED] Task %s marked failed (kind=%s)", celery_task_id, failure_kind)
     return update_data, failure_kind
 
 
@@ -570,47 +591,83 @@ def _handle_lifecycle_event(event: dict, event_type: str, celery_task_id: str) -
         db.close()
 
 
-def start_event_listener():
+# Backoff between reconnect attempts, in seconds. A connection that held for at
+# least ``_RECONNECT_MAX_DELAY`` counts as healthy and resets the delay.
+_RECONNECT_MIN_DELAY = 1.0
+_RECONNECT_MAX_DELAY = 60.0
+
+
+def _handle_event(event: dict) -> None:
+    """Process one incoming Celery event."""
+    event_type = event.get('type')
+    celery_task_id = event.get('uuid')
+
+    # ----- Custom events from the worker (live progress/logs) -----
+    if event_type in ('task-progress', 'task-log'):
+        _handle_custom_event(event)
+        return
+
+    if not celery_task_id:
+        return
+
+    _handle_lifecycle_event(event, event_type, celery_task_id)
+
+
+def _listen_once() -> None:
+    """Hold one broker connection and process events until it ends.
+
+    ``capture`` blocks for as long as the connection lives, so this returns
+    (or raises) only when the connection is gone.
     """
-    Start listening to Celery events from RabbitMQ
-    This runs in a background thread/process
-    """
-    logger.info("Starting Celery event listener...")
-
-    def handle_event(event):
-        """Process incoming Celery events"""
-        event_type = event.get('type')
-        celery_task_id = event.get('uuid')
-
-        # ----- Custom events from the worker (live progress/logs) -----
-        if event_type in ('task-progress', 'task-log'):
-            _handle_custom_event(event)
-            return
-
-        if not celery_task_id:
-            return
-
-        _handle_lifecycle_event(event, event_type, celery_task_id)
-
-    # Connect to RabbitMQ and listen for events
     with celery_app.connection() as connection:
         recv = EventReceiver(
             connection,
             handlers={
-                'task-started': handle_event,
-                'task-succeeded': handle_event,
-                'task-failed': handle_event,
-                'task-revoked': handle_event,
+                'task-started': _handle_event,
+                'task-succeeded': _handle_event,
+                'task-failed': _handle_event,
+                'task-revoked': _handle_event,
                 # Custom events emitted by the worker for live progress
                 # and per-line log tail. Routed to the same handler;
                 # branched at the top.
-                'task-progress': handle_event,
-                'task-log': handle_event,
+                'task-progress': _handle_event,
+                'task-log': _handle_event,
             }
         )
 
         logger.info("Celery event listener ready, waiting for events...")
         recv.capture(limit=None, timeout=None, wakeup=True)
+
+
+def start_event_listener() -> None:
+    """Listen to Celery events from RabbitMQ, reconnecting when the link drops.
+
+    This runs in a background thread and never returns. It used to open the
+    connection once; when RabbitMQ restarted or the network blinked, the thread
+    ended with an exception nobody saw and the backend received no task events
+    until it was restarted itself.
+    """
+    logger.info("Starting Celery event listener...")
+    delay = _RECONNECT_MIN_DELAY
+    while True:
+        started = time.monotonic()
+        failure: Exception | None = None
+        try:
+            _listen_once()
+        except Exception as exc:
+            failure = exc
+        if time.monotonic() - started >= _RECONNECT_MAX_DELAY:
+            delay = _RECONNECT_MIN_DELAY
+        if failure is None:
+            logger.warning("Celery event listener stopped; reconnecting in %.0fs", delay)
+        else:
+            logger.error(
+                "Celery event listener lost its connection; reconnecting in %.0fs",
+                delay,
+                exc_info=failure,
+            )
+        time.sleep(delay)
+        delay = min(delay * 2, _RECONNECT_MAX_DELAY)
 
 
 if __name__ == "__main__":

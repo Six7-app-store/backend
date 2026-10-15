@@ -11,7 +11,7 @@ import os
 
 import pytest
 
-from app.routers.apps import (
+from app.services.hcl_variable_parser import (
     PackerTemplateDiscoveryError,
     _discover_packer_templates,
     _PackerTemplate,

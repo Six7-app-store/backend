@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, asc, desc, exists, func
+from sqlalchemy import and_, asc, desc, exists, func, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.models import (
@@ -161,6 +161,62 @@ def derive_status(
     return raw_status
 
 
+# Every value ``derive_status`` can return. ``?status=`` accepts exactly these.
+DEPLOYMENT_STATUSES: tuple[str, ...] = (
+    "pending",
+    "running",
+    "success",
+    "failed",
+    "cancelled",
+    "destroying",
+    "destroyed",
+    "pausing",
+    "paused",
+    "resuming",
+    "pause_failed",
+    "resume_failed",
+)
+
+
+def _status_predicate(latest, status: str):
+    """SQL twin of :func:`derive_status` for one effective ``status``.
+
+    ``latest`` is the window subquery carrying the latest task's ``type`` and
+    ``status``. Every branch below is the inverse of one branch in
+    ``derive_status``; ``tests/test_phase1_correctness.py`` checks the two
+    against each other for every ``(type, status)`` pair, so they cannot drift
+    apart silently.
+    """
+    kind, state = latest.c.type, latest.c.status
+    in_flight = state.in_((TaskStatus.PENDING, TaskStatus.RUNNING))
+    if status == "destroying":
+        return and_(kind == TaskType.DESTROY, in_flight)
+    if status == "destroyed":
+        return and_(kind == TaskType.DESTROY, state == TaskStatus.SUCCESS)
+    if status == "pausing":
+        return and_(kind == TaskType.PAUSE, in_flight)
+    if status == "paused":
+        return and_(kind == TaskType.PAUSE, state == TaskStatus.SUCCESS)
+    if status == "pause_failed":
+        return and_(kind == TaskType.PAUSE, state == TaskStatus.FAILED)
+    if status == "resuming":
+        return and_(kind == TaskType.RESUME, in_flight)
+    if status == "resume_failed":
+        return and_(kind == TaskType.RESUME, state == TaskStatus.FAILED)
+    if status == "cancelled":
+        return state == TaskStatus.CANCELLED
+    # The plain statuses: a task type that has its own synthetic status never
+    # shows the raw one (a finished pause is "paused", not "success").
+    raw = TaskStatus(status)
+    shadowed = {
+        TaskStatus.PENDING: (TaskType.DESTROY, TaskType.PAUSE, TaskType.RESUME),
+        TaskStatus.RUNNING: (TaskType.DESTROY, TaskType.PAUSE, TaskType.RESUME),
+        TaskStatus.SUCCESS: (TaskType.DESTROY, TaskType.PAUSE),
+        TaskStatus.FAILED: (TaskType.PAUSE, TaskType.RESUME),
+    }[raw]
+    return and_(state == raw, kind.notin_(shadowed))
+
+
 def get_deployment_status(db: Session, deployment_id: UUID) -> str | None:
     """Effective deployment status for a single deployment.
 
@@ -265,25 +321,50 @@ def get_team_members(db: Session, team_id: UUID) -> list[User]:
 
 
 def get_deployment_teams_with_members(db: Session, deployment_id: UUID) -> list[dict[str, Any]]:
-    """Get all teams for a deployment with their members"""
-    teams = db.query(Team).filter(Team.deploymentId == deployment_id).all()
+    """Get all teams for a deployment with their members — single query."""
+    rows = (
+        db.query(Team, User)
+        .join(UserToTeam, UserToTeam.teamId == Team.teamId)
+        .join(User, User.userId == UserToTeam.userId)
+        .filter(Team.deploymentId == deployment_id)
+        .all()
+    )
 
-    result = []
-    for team in teams:
-        members = get_team_members(db, team.teamId)
-        result.append({
-            "teamId": team.teamId,
-            "name": team.name,
-            "members": [
-                {
-                    "userId": member.userId,
-                    "email": member.email,
-                    "username": member.username
-                }
-                for member in members
-            ]
-        })
+    teams_map: dict = {}
+    for team, user in rows:
+        if team.teamId not in teams_map:
+            teams_map[team.teamId] = {
+                "teamId": team.teamId,
+                "name": team.name,
+                "members": [],
+            }
+        teams_map[team.teamId]["members"].append(
+            {"userId": user.userId, "email": user.email, "username": user.username}
+        )
 
+    # Teams with no members at all won't appear in the join — add them.
+    all_teams = db.query(Team).filter(Team.deploymentId == deployment_id).all()
+    for team in all_teams:
+        if team.teamId not in teams_map:
+            teams_map[team.teamId] = {"teamId": team.teamId, "name": team.name, "members": []}
+
+    return list(teams_map.values())
+
+
+def get_team_emails_bulk(db: Session, team_ids: list) -> dict[str, list[str]]:
+    """Return {team_name: [email, ...]} for all given team IDs in one query."""
+    if not team_ids:
+        return {}
+    rows = (
+        db.query(Team.name, User.email)
+        .join(UserToTeam, UserToTeam.teamId == Team.teamId)
+        .join(User, User.userId == UserToTeam.userId)
+        .filter(Team.teamId.in_(team_ids))
+        .all()
+    )
+    result: dict[str, list[str]] = {}
+    for team_name, email in rows:
+        result.setdefault(team_name, []).append(email)
     return result
 
 
@@ -348,6 +429,7 @@ def get_deployments(
     app_id: UUID | None = None,
     status: str | None = None,
     include_deleted: bool = False,
+    owner_ids: list[UUID] | None = None,
 ) -> list[Deployment]:
     """Get deployments with optional filters. Hides soft-deleted by default.
 
@@ -358,6 +440,10 @@ def get_deployments(
     ``UserToTeam`` row OR has a direct ``UserToDeployment`` mapping.
     Mutually exclusive with ``user_id``; if both are set ``user_id``
     wins.
+
+    ``owner_ids`` keeps deployments owned by any of the given users (the
+    course-scope listing). It combines with every other filter, so ``status``,
+    ``app_id`` and the paging apply to it as well.
     """
     query = db.query(Deployment)
 
@@ -385,6 +471,8 @@ def get_deployments(
             | (Deployment.deploymentId.in_(member_deployment_ids_via_teams))
             | (Deployment.deploymentId.in_(member_deployment_ids_direct))
         )
+    if owner_ids is not None:
+        query = query.filter(Deployment.userId.in_(owner_ids))
     if app_id:
         query = query.filter(Deployment.appId == app_id)
 
@@ -392,8 +480,11 @@ def get_deployments(
     # LATEST task per deployment (see ``derive_status``), so we join a
     # window-function subquery pinning the latest task and apply the
     # equivalent predicate here — before offset/limit — so the page size
-    # stays correct.
+    # stays correct. The window only looks at tasks of deployments that
+    # survived the filters above, not at every task in the table.
     if status:
+        if status not in DEPLOYMENT_STATUSES:
+            return []
         latest_rn = (
             func.row_number()
             .over(partition_by=Task.deploymentId, order_by=desc(Task.created_at))
@@ -405,7 +496,9 @@ def get_deployments(
                 Task.status.label("status"),
                 Task.type.label("type"),
                 latest_rn,
-            ).subquery()
+            )
+            .filter(Task.deploymentId.in_(query.with_entities(Deployment.deploymentId)))
+            .subquery()
         )
         query = query.join(
             latest_subq,
@@ -413,38 +506,19 @@ def get_deployments(
                 latest_subq.c.did == Deployment.deploymentId,
                 latest_subq.c.rn == 1,
             ),
-        )
+        ).filter(_status_predicate(latest_subq, status))
 
-        if status == "destroying":
-            query = query.filter(
-                latest_subq.c.type == TaskType.DESTROY,
-                latest_subq.c.status.in_((TaskStatus.PENDING, TaskStatus.RUNNING)),
-            )
-        elif status == "destroyed":
-            query = query.filter(
-                latest_subq.c.type == TaskType.DESTROY,
-                latest_subq.c.status == TaskStatus.SUCCESS,
-            )
-        else:
-            # Plain task statuses, mirroring ``derive_status``:
-            # - ``pending``/``running``/``success`` match deploy-typed
-            #   tasks only (destroy surfaces as destroying/destroyed).
-            # - ``failed``/``cancelled`` bleed through both task types.
-            try:
-                status_enum = TaskStatus(status)
-            except ValueError:
-                # Unknown status string → empty result.
-                return []
-            query = query.filter(latest_subq.c.status == status_enum)
-            if status_enum in (
-                TaskStatus.PENDING,
-                TaskStatus.RUNNING,
-                TaskStatus.SUCCESS,
-            ):
-                query = query.filter(latest_subq.c.type != TaskType.DESTROY)
-
-    # Order by deploymentId (UUID)
-    query = query.order_by(desc(Deployment.deploymentId))
+    # Newest first. A deployment has no created_at column; it came to life
+    # with its first task, which is also what the API reports as created_at.
+    # The id only breaks ties so that offset/limit pages stay stable. (The id
+    # alone is a random UUID v4 and orders by nothing.)
+    first_task_at = (
+        select(func.min(Task.created_at))
+        .where(Task.deploymentId == Deployment.deploymentId)
+        .correlate(Deployment)
+        .scalar_subquery()
+    )
+    query = query.order_by(desc(first_task_at).nulls_last(), desc(Deployment.deploymentId))
 
     return query.offset(skip).limit(limit).all()
 

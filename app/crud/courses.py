@@ -14,7 +14,7 @@ def get_course(db: Session, course_id: UUID) -> Course | None:
 
 def get_courses(db: Session, skip: int = 0, limit: int = 100) -> list[Course]:
     """Get all courses"""
-    return db.query(Course).offset(skip).limit(limit).all()
+    return db.query(Course).order_by(Course.name, Course.courseId).offset(skip).limit(limit).all()
 
 
 def create_course(db: Session, course: CourseCreate) -> Course:
