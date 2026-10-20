@@ -89,6 +89,23 @@ def ensure_view_app(user: User, app: App, *, db: Session | None = None) -> None:
         raise _forbidden("app_view_forbidden")
 
 
+def can_deploy_version(user: User, app: App, version_tag: str, *, db: Session) -> bool:
+    """Whether ``user`` may deploy ``version_tag`` of ``app``.
+
+    Owner and admin may deploy any tag — that is how an author tries a
+    release before submitting it. Everyone else only an approved one:
+    seeing the app (it has *some* approved version) is not enough.
+    """
+    if _is_owner(user, app.userId) or _is_admin(user):
+        return True
+    return crud_approvals.has_approved_version(db, app.appId, version_tag)
+
+
+def ensure_deploy_version(user: User, app: App, version_tag: str, *, db: Session) -> None:
+    if not can_deploy_version(user, app, version_tag, db=db):
+        raise _forbidden("version_not_approved")
+
+
 def can_list_all_apps(user: User) -> bool:
     """Whether ``user`` may list every app (including private + unapproved).
 
