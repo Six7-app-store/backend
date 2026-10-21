@@ -332,10 +332,10 @@ def _find_account_for_user(
         normalised_key = _normalise_account_key(key)
         suffix = normalised_key[len(team_prefix):] if normalised_key.startswith(team_prefix) else normalised_key
 
-        candidates_with_inner_username = candidates | {_normalise_account_key(raw.get("username"))}
-        candidates_with_inner_username.discard("")
-
-        if suffix in candidates_with_inner_username:
+        # The account's own ``username`` is a second name for the same
+        # account, so it is checked against the user's candidates — never
+        # added to them, or every account would match itself.
+        if suffix in candidates or _normalise_account_key(raw.get("username")) in candidates:
             return key, raw
     return None
 

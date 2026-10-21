@@ -168,6 +168,34 @@ def test_my_access_never_leaks_teammate_credentials(client, db, mock_user, mock_
 
 
 @pytest.mark.integration
+def test_my_access_ignores_a_teammate_account_listed_first(client, db, mock_user, mock_student):
+    """A teammate's account must not match the caller just because it
+    comes first in the outputs. Each account carries its own
+    ``username``; were that counted as one of the caller's names, every
+    account would match itself and the first one would win. Real
+    templates name the key after the username, as the teammate here."""
+    outputs = _outputs_for(
+        "Team-1",
+        ("owneruser", "owneruser", "pw-owner-SECRET"),
+        ("student", "student", "s3cret-student"),
+    )
+    deployment, _team = _seed_deployment_with_outputs(
+        db, owner=mock_user, members=[mock_student, mock_user], outputs=outputs,
+    )
+
+    from app.main import app as fastapi_app
+    from app.utils.auth import get_current_user
+    fastapi_app.dependency_overrides[get_current_user] = lambda: mock_student
+
+    response = client.get(f"/deployments/{deployment.deploymentId}/my-access")
+
+    assert response.status_code == 200, response.text
+    accounts = response.json()["user_accounts"]
+    assert list(accounts) == ["Team-1-student"]
+    assert accounts["Team-1-student"]["auth"] == "s3cret-student"
+
+
+@pytest.mark.integration
 def test_my_access_unrelated_student_403(student_client, db, mock_user, mock_student):
     """A student with no relation to the deployment (not in any team)
     is rejected at the member-view gate with 403 — not a data-less 200."""
