@@ -209,7 +209,9 @@ class AppWithUser(AppResponse):
 
 
 class AppWithVersions(AppWithUser):
-    versions: list[dict[str, str]] = []
+    # Entries from ``git_service.get_versions``: ``version`` plus commit
+    # and, for tags with a release, its details (values may be null).
+    versions: list[dict[str, Any]] = []
 
     model_config = ConfigDict(from_attributes=True)
 

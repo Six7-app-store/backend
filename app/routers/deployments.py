@@ -1330,8 +1330,8 @@ def _dispatch_lifecycle_task(
 ):
     """Enqueue any post-deploy lifecycle worker task for a deployment.
 
-    Used by destroy, pause, resume, and per-VM redeploy — all four
-    follow the same pattern: load user inputs, gather team membership,
+    Used by destroy, pause, resume, per-VM redeploy and per-VM reboot —
+    all of them follow the same pattern: load user inputs, gather team membership,
     fetch the encrypted OpenStack envelope, atomically insert a
     PENDING task row, commit, then ``send_task`` outside the locked
     TX. On a Celery send failure the task row flips to FAILED in a
@@ -1352,8 +1352,10 @@ def _dispatch_lifecycle_task(
                              live-stream view without re-fetching.
         extra_args:          additional positional args appended to the
                              Celery payload after the standard seven.
-                             Used by ``tasks.redeploy_resource`` to pass
-                             the targeted resource address.
+                             Used by ``tasks.redeploy_resource`` and
+                             ``tasks.reboot_resource`` to pass the
+                             targeted resource address (and, for reboot,
+                             the OpenStack server id).
     """
     try:
         user_vars = json.loads(deployment.userInputVar) if deployment.userInputVar else {}
@@ -1361,7 +1363,7 @@ def _dispatch_lifecycle_task(
         user_vars = {}
 
     # Belt + braces: for lifecycle tasks that do NOT recreate the VM
-    # (destroy, pause, resume), strip any ``@openstack:file:*`` payloads
+    # (destroy, pause, resume, reboot), strip any ``@openstack:file:*`` payloads
     # from the user-vars BEFORE they reach the worker. Files are only
     # consumed at apply-time by cloud-init's write_files; everything
     # else just hands the same var-set to OpenTofu which then
@@ -1385,7 +1387,7 @@ def _dispatch_lifecycle_task(
     #
     # DEPLOY/UPDATE legitimately need the file bytes too — they don't
     # enter the worker via this helper.
-    if task_type in (TaskType.DESTROY, TaskType.PAUSE, TaskType.RESUME):
+    if task_type in (TaskType.DESTROY, TaskType.PAUSE, TaskType.RESUME, TaskType.REBOOT):
         tofu_block = user_vars.get("tofu")
         if isinstance(tofu_block, dict):
             user_vars = {
@@ -1435,10 +1437,10 @@ def _dispatch_lifecycle_task(
 
 
 # ----------------------------------------------------------------
-# INFRASTRUCTURE RESOURCES (per-deployment status + per-VM redeploy)
+# INFRASTRUCTURE RESOURCES (per-deployment status + per-VM redeploy/reboot)
 # ----------------------------------------------------------------
 #
-# Three sibling endpoints power the Infrastructure tab on the
+# Four sibling endpoints power the Infrastructure tab on the
 # deployment detail page:
 #
 #   * GET /{deployment_id}/resources?refresh=…
@@ -1460,7 +1462,12 @@ def _dispatch_lifecycle_task(
 #       compute-instance category, so a hand-crafted POST can't smuggle
 #       a network-resource target (which would tear down all team VMs).
 #
-# All three are owner-only — the data exposed (live OpenStack status,
+#   * POST /{deployment_id}/resources/{address}/reboot
+#       Per-VM hard reboot — ``openstack server reboot --hard`` on the
+#       one server behind the address. Same whitelist as redeploy; the
+#       VM keeps its disk, IPs and state, the other VMs are untouched.
+#
+# All four are owner-only — the data exposed (live OpenStack status,
 # the ability to bounce a VM) is not something a teammate should be
 # able to access through the deployment detail page.
 
@@ -1599,27 +1606,23 @@ def get_deployment_resource_detail(
     return DeploymentResourceSchema.model_validate(_view_asdict(view))
 
 
-@router.post(
-    "/{deployment_id}/resources/{address:path}/redeploy",
-    status_code=status.HTTP_202_ACCEPTED,
-)
-def redeploy_deployment_resource(
+def _load_operable_instance(
     deployment_id: UUID,
     address: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    db: Session,
+    current_user: User,
 ):
-    """Replace one compute instance via ``tofu apply -replace=…``.
+    """Shared guard of the per-VM actions (redeploy, reboot).
 
-    Address-whitelisted: we re-parse the cached TF state and only
-    accept addresses that resolve to a compute instance. Anything else
-    fails with 422 — the redeploy of a network resource would tear
-    down all the team VMs, which is not what a one-VM "fix it" action
-    should do.
+    Takes the per-user advisory lock (same as create/destroy/pause, so
+    a parallel VM action can't race a destroy; held only for the row
+    insert, Celery dispatch happens after commit), loads the
+    deployment, applies the operate gate and whitelists ``address``
+    against the cached TF state. Only compute instances pass — acting
+    on a network resource would hit all team VMs, which is not what a
+    one-VM action should do.
 
-    Concurrency: same per-user advisory lock as create/destroy/pause
-    so a parallel redeploy can't race a destroy. The lock is held
-    only for the row insert; Celery dispatch happens after commit.
+    Returns ``(deployment, resource)``; raises 404/403/422 otherwise.
     """
     crud_locks.acquire_user_xact_lock(db, current_user.userId)
 
@@ -1629,7 +1632,7 @@ def redeploy_deployment_resource(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Deployment not found",
         )
-    # Per-VM redeploy is a mutating operation — operate gate
+    # Per-VM actions are mutating operations — operate gate
     # (owner-or-admin). Course-teachers may inspect the resource via
     # the GET endpoints above but not bounce it.
     ensure_operate_deployment(current_user, deployment, db)
@@ -1661,6 +1664,30 @@ def redeploy_deployment_resource(
                 "category": match.category,
             },
         )
+    return deployment, match
+
+
+@router.post(
+    "/{deployment_id}/resources/{address:path}/redeploy",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def redeploy_deployment_resource(
+    deployment_id: UUID,
+    address: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Replace one compute instance via ``tofu apply -replace=…``.
+
+    Address-whitelisted: we re-parse the cached TF state and only
+    accept addresses that resolve to a compute instance. Anything else
+    fails with 422 — the redeploy of a network resource would tear
+    down all the team VMs, which is not what a one-VM "fix it" action
+    should do.
+
+    Concurrency and whitelist: see :func:`_load_operable_instance`.
+    """
+    deployment, _ = _load_operable_instance(deployment_id, address, db, current_user)
 
     return _dispatch_lifecycle_task(
         db=db,
@@ -1670,6 +1697,47 @@ def redeploy_deployment_resource(
         celery_task_name="tasks.redeploy_resource",
         response_status="redeploying",
         extra_args=[address],
+    )
+
+
+@router.post(
+    "/{deployment_id}/resources/{address:path}/reboot",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def reboot_deployment_resource(
+    deployment_id: UUID,
+    address: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Hard-reboot one compute instance (``openstack server reboot --hard``).
+
+    The quick fix for a hung or crashed VM: unlike redeploy, the VM is
+    not recreated — disk, IPs and everything installed stay. A hard
+    reboot because a crashed guest no longer answers the ACPI signal of
+    a soft one; Nova also accepts it from SHUTOFF and ERROR.
+
+    Same guard as redeploy (:func:`_load_operable_instance`). The
+    server id is taken from the cached state and passed along, so the
+    worker needs neither a git clone nor ``tofu init`` for it.
+    """
+    deployment, match = _load_operable_instance(deployment_id, address, db, current_user)
+    if not match.provider_id:
+        # Instance in state without an id: the create failed before
+        # OpenStack persisted it, there's nothing to reboot.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"reason": "resource_without_server_id", "address": address},
+        )
+
+    return _dispatch_lifecycle_task(
+        db=db,
+        deployment=deployment,
+        current_user=current_user,
+        task_type=TaskType.REBOOT,
+        celery_task_name="tasks.reboot_resource",
+        response_status="rebooting",
+        extra_args=[address, match.provider_id],
     )
 
 
