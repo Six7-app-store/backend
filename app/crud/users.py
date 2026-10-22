@@ -37,7 +37,7 @@ def get_users(
     if course_id:
         query = query.filter(User.courseId == course_id)
 
-    return query.offset(skip).limit(limit).all()
+    return query.order_by(User.created_at, User.userId).offset(skip).limit(limit).all()
 
 
 def create_user(db: Session, user: UserCreate) -> User:

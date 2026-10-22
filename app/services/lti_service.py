@@ -23,6 +23,7 @@ from pylti1p3.registration import Registration
 from pylti1p3.roles import StudentRole, TeacherRole
 from pylti1p3.service_connector import ServiceConnector
 from pylti1p3.tool_config import ToolConfDict
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -472,7 +473,26 @@ def provision_user(db: Session, identity: LaunchIdentity) -> User:
         db.add(link)
     link.last_login_at = utcnow()
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Two concurrent first-launches (e.g. two browser tabs) both
+        # passed the read-check above and raced to insert. The second
+        # one loses the unique constraint on (provider, issuer, subject).
+        # Roll back and re-fetch the row that the winner inserted.
+        db.rollback()
+        link = (
+            db.query(UserIdentity)
+            .filter(
+                UserIdentity.provider == IdentityProvider.LTI,
+                UserIdentity.issuer == identity.issuer,
+                UserIdentity.subject == identity.subject,
+            )
+            .first()
+        )
+        if link is None:
+            raise
+        user = link.user
     db.refresh(user)
     return user
 
@@ -523,7 +543,23 @@ def record_context(
         if memberships_url and context.memberships_url != memberships_url:
             context.memberships_url = memberships_url
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Two concurrent first-launches from the same Moodle course both
+        # found no existing LtiContext row and raced to insert. Roll back
+        # and re-fetch the winner's row.
+        db.rollback()
+        context = (
+            db.query(LtiContext)
+            .filter(
+                LtiContext.issuer == identity.issuer,
+                LtiContext.context_id == identity.context_id,
+            )
+            .first()
+        )
+        if context is None:
+            raise
     db.refresh(context)
     return context
 

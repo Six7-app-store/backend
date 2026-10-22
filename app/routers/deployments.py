@@ -6,6 +6,7 @@ import logging
 import re
 from collections.abc import AsyncIterator
 from dataclasses import asdict
+from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -20,8 +21,8 @@ from app.crud import openstack_credentials as crud_openstack_credentials
 from app.crud import teams as crud_teams
 from app.crud import users as crud_users
 from app.database import get_db
-from app.models import Deployment, TaskStatus, TaskType, User, UserRole
 from app.models import Task as TaskModel  # for ad-hoc state queries
+from app.models import TaskStatus, TaskType, User, UserRole
 from app.schemas import (
     DeploymentCreate,
     DeploymentDetail,
@@ -42,11 +43,13 @@ from app.services.deployment_status import (
     build_resource_detail,
     build_resource_views,
 )
+from app.services.hcl_variable_parser import load_variable_definitions
 from app.services.tofu_state_parser import parse_tf_state
 from app.utils.auth import get_current_user
 from app.utils.capabilities import (
     can_view_deployment_owner,
     ensure_create_deployment,
+    ensure_deploy_version,
     ensure_operate_deployment,
     ensure_resend_access,
     ensure_view_app,
@@ -79,42 +82,25 @@ def _list_course_scope_deployments(
     runs the shared enrichment loop over the result.
     """
     my_courses = get_my_course_teacher_ids(current_user, db)
-    if current_user.role == UserRole.ADMIN:
-        # Admins always see everything inside the chosen scope.
-        # We still need the course-id filter to make ``?scope=course``
-        # narrow the listing in some way — otherwise the param is a
-        # no-op for admins. The implementation: pull every course
-        # the admin is registered as course-teacher for (typically
-        # empty), and fall back to the union with the explicit
-        # ``student`` filter so the route still does something
-        # useful in the common case of an admin requesting a
-        # specific student's deployments via the profile page.
-        pass
     if not my_courses and current_user.role != UserRole.ADMIN:
-        # Teacher with no course-teacher rows — the course scope
-        # is empty by definition. Return an empty page rather
-        # than the teacher's own owned set, because that would
-        # mask the absence of any teacher-course assignment.
+        # Teacher with no course-teacher rows — the course scope is empty by
+        # definition. Return an empty page rather than the teacher's own owned
+        # set, because that would mask the absence of any teacher-course
+        # assignment.
         return []
 
-    # Resolve the set of candidate student userIds: every user
-    # whose ``courseId`` falls inside ``my_courses``. When the
-    # caller also passed ``?student=<id>``, narrow to that single
-    # user IFF they actually sit inside one of those courses.
-    student_q = db.query(User.userId).filter(
-        User.courseId.in_(my_courses)
-    )
+    # Every user whose ``courseId`` falls inside ``my_courses``. With
+    # ``?student=<id>`` only that user, and only if they sit in one of those
+    # courses; otherwise the caller would learn that the student exists.
+    student_q = db.query(User.userId).filter(User.courseId.in_(my_courses))
     if student is not None:
-        # ``?student=<id>``: require the student to be inside one
-        # of the teacher's courses; otherwise we'd leak that
-        # ``student`` exists at all to a teacher who can't see them.
         student_q = student_q.filter(User.userId == student)
     owner_ids = [row[0] for row in student_q.all()]
 
-    if current_user.role == UserRole.ADMIN and not owner_ids:
-        # Admin path with empty course set + no student filter →
-        # show the admin's own owned set instead of an empty page.
-        if student is None:
+    if not owner_ids:
+        if current_user.role == UserRole.ADMIN and student is None:
+            # An admin without taught courses gets their own deployments
+            # rather than an empty page.
             return crud_deployments.get_deployments(
                 db,
                 skip=skip,
@@ -123,32 +109,18 @@ def _list_course_scope_deployments(
                 app_id=app_id,
                 status=status_filter,
             )
-        return []
-    if not owner_ids:
-        # Teacher in scope mode but their courses are empty, or
-        # the named ``student`` isn't in any of their courses —
-        # empty page, no leak about that student's existence.
+        # A teacher whose courses are empty, or a ``student`` outside them:
+        # an empty page, no leak about that student's existence.
         return []
 
-    # We can't easily widen the existing get_deployments
-    # signature to accept an owner_id IN clause without
-    # disturbing the other branches, so we build the query
-    # inline here. Same soft-delete + app_id + status
-    # semantics as the helper.
-    q = db.query(Deployment).filter(Deployment.deleted_at.is_(None))
-    q = q.filter(Deployment.userId.in_(owner_ids))
-    if app_id:
-        q = q.filter(Deployment.appId == app_id)
-    # Reuse the helper's status-filter implementation by
-    # forwarding to ``get_deployments`` with a synthetic
-    # ``user_id`` of None and a post-filter — but the helper
-    # short-circuits on user_id, so simplest is to inline the
-    # ordering/pagination and skip the status filter here. A
-    # course-teacher list view rarely needs status filtering
-    # in the index; the per-deployment detail page handles
-    # status-specific UX.
-    q = q.order_by(desc(Deployment.deploymentId))
-    return q.offset(skip).limit(limit).all()
+    return crud_deployments.get_deployments(
+        db,
+        skip=skip,
+        limit=limit,
+        owner_ids=owner_ids,
+        app_id=app_id,
+        status=status_filter,
+    )
 
 
 # ----------------------------------------------------------------
@@ -193,6 +165,15 @@ def list_deployments(
     parameter is ignored, not rejected, to keep the API forgiving
     against query-string-builder bugs in the frontend).
     """
+    if status_filter is not None and status_filter not in crud_deployments.DEPLOYMENT_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "reason": "unknown_status",
+                "allowed": list(crud_deployments.DEPLOYMENT_STATUSES),
+            },
+        )
+
     is_staff = current_user.role in (UserRole.TEACHER, UserRole.ADMIN)
     use_course_scope = is_staff and scope == "course"
 
@@ -370,7 +351,7 @@ def get_deployment(
     # ``/apps``-endpoints already use — to swap the bytes for the
     # data-URL string in place. Apps without an uploaded image are
     # unaffected (``getattr`` returns ``None`` and the helper no-ops).
-    from app.routers.apps import _serialize_app  # local: avoid import cycle
+    from app.routers.apps import _serialize_app
     serialised_app = _serialize_app(deployment.app)
 
     return DeploymentDetail(
@@ -771,6 +752,97 @@ def _validate_scoped_user_input(
                 )
 
 
+def _slot_username(user: User) -> str:
+    """The name a person's slot is keyed by — mirror of the wizard's
+    ``useWizardTeams``: username, else the email's local part, else the
+    first name, else the start of the id."""
+    return (
+        user.username
+        or (user.email or "").split("@")[0]
+        or user.firstName
+        or str(user.userId)[:8]
+    )
+
+
+def _expected_slots(scope: str, teams_payload: list, db: Session) -> list[str]:
+    """Every slot a scoped variable needs for this roster: one per team,
+    or ``TeamName-Username`` per member."""
+    slots: list[str] = []
+    for team in teams_payload or []:
+        if scope == "team":
+            slots.append(team.name)
+            continue
+        for user_id in team.userIds:
+            user = crud_users.get_user(db, user_id)
+            if user:
+                slots.append(f"{team.name}-{_slot_username(user)}")
+    return slots
+
+
+def _is_unfilled(value) -> bool:
+    """``None``, blank text, an empty list or map — or a file without bytes."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip() == ""
+    if isinstance(value, (list, dict)) and len(value) == 0:
+        return True
+    return isinstance(value, dict) and "content_b64" in value and not value.get("content_b64")
+
+
+def _validate_required_inputs(
+    user_input_var: dict | None,
+    variable_definitions: list[dict],
+    teams_payload: list,
+    db: Session,
+) -> None:
+    """Reject the create when a required variable or file is missing.
+
+    A variable without a default is required. Unscoped ones need a value;
+    team/user scoped ones and file variables a value in every slot of the
+    roster (``all`` for a file for everybody). Run after the files are
+    folded into ``userInputVar.tofu`` and after the slot identities were
+    checked, so this only answers "is anything left empty?".
+
+    Without it a missing task file only surfaces in the worker, minutes
+    later, as an OpenTofu error. Raises 422 with
+    ``reason="required_missing"`` and every gap as ``{variable, slot?}``.
+    """
+    block = (user_input_var or {}).get("tofu")
+    block = block if isinstance(block, dict) else {}
+    missing: list[dict] = []
+    for vdef in variable_definitions:
+        if not vdef.get("required"):
+            continue
+        name = vdef["name"]
+        is_file = vdef.get("osType") == "file"
+        scope = (
+            (vdef.get("osScope") or vdef.get("varScope")) if is_file else vdef.get("varScope")
+        ) or "all"
+        value = block.get(name)
+        if scope == "all":
+            filled = (
+                isinstance(value, dict) and not _is_unfilled(value.get("all"))
+                if is_file
+                else not _is_unfilled(value)
+            )
+            if not filled:
+                missing.append({"variable": name})
+            continue
+        slot_map = value if isinstance(value, dict) else {}
+        slots = _expected_slots(scope, teams_payload, db)
+        if not slots and not is_file:
+            missing.append({"variable": name})
+        missing.extend(
+            {"variable": name, "slot": slot} for slot in slots if _is_unfilled(slot_map.get(slot))
+        )
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"reason": "required_missing", "missing": missing},
+        )
+
+
 def _strip_file_vars_from_user_input(user_input_var: dict | None) -> dict | None:
     """Strip per-file ``content_b64`` payloads from a userInputVar dict.
 
@@ -916,23 +988,33 @@ def create_deployment(
     # endpoint when visibility is denied.
     ensure_view_app(current_user, target_app, db=db)
 
+    # The version is chosen, never guessed: there used to be a "main"
+    # fallback here, and the wizard sent "latest" — neither is a release
+    # anyone approved.
+    if not deployment.releaseTag:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"reason": "version_required"},
+        )
+    # Seeing the app only means SOME version is approved. The version being
+    # deployed has to be one, unless the caller owns the app or is an admin.
+    ensure_deploy_version(current_user, target_app, deployment.releaseTag, db)
+
     # Load the app author's variable declarations so we can enforce
-    # per-variable contracts (``varScope``, ``fileExtensions``) below.
-    # We only do this when the request actually carries variables /
-    # files — for a no-input deploy the round-trip into Git would be
-    # waste. Same parser as ``GET /apps/{id}/variables`` so client and
-    # server agree on which variable is scoped/file/free-text.
+    # per-variable contracts (``varScope``, ``fileExtensions``, required
+    # inputs) below. Same parser as ``GET /apps/{id}/variables`` so
+    # client and server agree on which variable is scoped/file/required.
+    # Loaded for every deploy, also one without inputs: that is exactly
+    # the request that forgot a required file.
     variable_definitions: list[dict] = []
-    if deployment.userInputVar or deployment.files:
-        from app.routers.apps import load_variable_definitions
-        release_tag = deployment.releaseTag or "main"
+    if target_app.git_link:
         try:
-            variable_definitions = load_variable_definitions(target_app, release_tag)
+            variable_definitions = load_variable_definitions(target_app, deployment.releaseTag)
         except HTTPException as exc:
             if exc.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY:
                 raise
-            # 400 (no git_link) or 500 (git unreachable) — skip validation,
-            # proceed without variable definitions.
+            # 500 (git unreachable) — skip validation, proceed without
+            # variable definitions; the worker still fails loudly.
 
     # Fold the wizard's parallel ``files`` upload into
     # ``userInputVar.tofu`` before the row gets persisted, so the
@@ -955,6 +1037,12 @@ def create_deployment(
             deployment.userInputVar,
             variable_definitions,
             deployment.teams or [],
+        )
+        _validate_required_inputs(
+            deployment.userInputVar,
+            variable_definitions,
+            deployment.teams or [],
+            db,
         )
 
     db_deployment = crud_deployments.create_deployment(
@@ -1311,13 +1399,11 @@ def _dispatch_lifecycle_task(
 
     teams_dict: dict = {}
     if deployment.teams:
-        # Persisted Team rows expose membership via the ``user_to_teams``
-        # association, not a flat ``userIds`` field — that lives on the
-        # request-side Pydantic schema in the create endpoint, not on
-        # the ORM. ``get_team_members`` does the join for us.
-        for team in deployment.teams:
-            members = crud_deployments.get_team_members(db, team.teamId)
-            teams_dict[team.name] = [{"email": m.email} for m in members]
+        team_ids = [t.teamId for t in deployment.teams]
+        teams_dict = {
+            name: [{"email": e} for e in emails]
+            for name, emails in crud_deployments.get_team_emails_bulk(db, team_ids).items()
+        }
 
     openstack_envelope = _fetch_dispatch_envelope(
         db, current_user.userId, rollback_on_missing=False
@@ -1695,6 +1781,23 @@ def resume_deployment(
     )
 
 
+def _content_disposition(filename: str) -> str:
+    """``Content-Disposition`` for a download, safe for any file name.
+
+    The name is user input. Put raw into the header, a ``€`` made Starlette
+    fail while encoding it (headers are Latin-1) and a quote or line break let
+    the name leave the header value. So the legacy ``filename`` carries an ASCII
+    fallback with every other character replaced, and ``filename*`` (RFC 5987)
+    carries the real name, percent-encoded.
+    """
+    unsafe = {'"', "\\", ";"}  # quote, backslash, semicolon
+    fallback = "".join(
+        c if c.isascii() and c.isprintable() and c not in unsafe else "_" for c in filename
+    ) or "download"
+    encoded = quote(filename, safe="")
+    return f'attachment; filename="{fallback}"; filename*=UTF-8\'\'{encoded}'
+
+
 # ----------------------------------------------------------------
 # DOWNLOAD UPLOADED FILE
 # ----------------------------------------------------------------
@@ -1780,13 +1883,7 @@ def download_deployment_file(
         content=payload,
         media_type=content_type,
         headers={
-            # ``filename*`` is the RFC 5987 form for non-ASCII names;
-            # we always emit it alongside the legacy ``filename`` so
-            # clients without UTF-8 support still see something.
-            "Content-Disposition": (
-                f'attachment; filename="{filename}"; '
-                f"filename*=UTF-8''{filename}"
-            ),
+            "Content-Disposition": _content_disposition(filename),
             "Content-Length": str(len(payload)),
         },
     )
@@ -1865,8 +1962,8 @@ def resend_access_credentials(
     Access control: caller must have access to the deployment (owner
     or teacher/admin). The endpoint is intentionally idempotent —
     each call sends one mail to the targeted user. There's no rate
-    limit at the API level; SMTP and Gmail's per-account quota are
-    the natural backstops.
+    limit at the API level; the mail server's own sending limits are
+    the only backstop.
 
     Mapping ResendError to HTTP:
       * ``deployment_not_found`` → 404

@@ -1,11 +1,13 @@
 """Git service for repository management and release information retrieval."""
 
+import ipaddress
 import logging
 import re
 import shutil
+import socket
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import git
 import requests
@@ -15,6 +17,97 @@ from urllib3.util.retry import Retry
 from ..config import settings
 
 logger = logging.getLogger(__name__)
+
+# Private networks — must match the list in schemas.py. The schema
+# validator is the primary gate; this is defense-in-depth so the
+# service is safe even if called directly (e.g. from a Celery task).
+_PRIVATE_NETWORKS = [
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+]
+
+
+def _is_private_host(hostname: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(socket.gethostbyname(hostname))
+        return any(addr in net for net in _PRIVATE_NETWORKS)
+    except (socket.gaierror, ValueError):
+        return False
+
+
+def _assert_safe_git_url(git_url: str) -> None:
+    """Raise ValueError if ``git_url`` resolves to a private/internal address.
+
+    Called before any credential is injected into the URL to prevent
+    SSRF: a staff-controlled ``git_link`` must not be able to reach
+    internal infrastructure (metadata endpoints, Postgres, RabbitMQ…).
+    """
+    parsed = urlparse(git_url if "://" in git_url else f"https://{git_url.replace(':', '/', 1).replace('git@', '')}")
+    hostname = parsed.hostname or ""
+    if _is_private_host(hostname):
+        raise ValueError(
+            f"git_link hostname {hostname!r} resolves to a private address; "
+            "refusing to inject credentials"
+        )
+
+
+def _allowed_hosts() -> set[str]:
+    """Lower-cased hosts the platform token may be sent to."""
+    return {h.strip().lower() for h in settings.GIT_ALLOWED_HOSTS if h.strip()}
+
+
+def _host_of(git_url: str) -> str:
+    """Hostname of an https/http/``git@`` URL, lower-cased ('' if unparseable)."""
+    parsed = urlparse(
+        git_url
+        if "://" in git_url
+        else f"https://{git_url.replace(':', '/', 1).replace('git@', '')}"
+    )
+    return (parsed.hostname or "").lower()
+
+
+def _platform_of(host: str) -> str:
+    """``github`` for github.com, ``gitlab`` for any other allowed host, else ``unknown``.
+
+    Decided by an exact match against ``GIT_ALLOWED_HOSTS`` — never by a
+    substring of the name, which let ``gitlab.attacker.example`` pass for GitLab
+    and receive the platform token.
+    """
+    host = host.lower()
+    if host == "github.com":
+        return "github"
+    if host in _allowed_hosts():
+        return "gitlab"
+    return "unknown"
+
+
+def _version_sort_key(version: dict[str, Any]) -> tuple[int, tuple[int, ...], str]:
+    """Sort key for a tag entry; every key has the same shape.
+
+    Tags that read as dotted numbers (``v1.10.0``) sort numerically and come
+    first when sorted in reverse. Anything else (``latest``, ``v1.3.0-rc1``)
+    sorts after them by name. The key must stay comparable across both kinds:
+    the old key mixed int tuples with str tuples, which made ``list.sort``
+    raise ``TypeError`` as soon as a repository had one non-numeric tag.
+    """
+    name = str(version.get("version") or "")
+    try:
+        return (1, tuple(int(part) for part in name.lstrip("v").split(".")), name)
+    except ValueError:
+        return (0, (), name)
+
+
+# Page size requested from the provider APIs (100 is the maximum for both) and
+# the most pages read per resource.
+_PAGE_SIZE = 100
+_MAX_PAGES = 20
 
 
 class GitService:
@@ -48,6 +141,13 @@ class GitService:
 
     def _get_authenticated_url(self, git_url: str) -> str:
         """Convert Git URL to HTTPS format with token authentication."""
+        _assert_safe_git_url(git_url)
+        host = _host_of(git_url)
+        if _platform_of(host) == "unknown":
+            raise ValueError(
+                f"git_link host {host!r} is not in GIT_ALLOWED_HOSTS; "
+                "refusing to inject credentials"
+            )
         url = git_url
         if url.startswith('git@'):
             url = url.replace('git@', '').replace(':', '/', 1)
@@ -72,31 +172,67 @@ class GitService:
             match = re.match(pattern, git_url)
             if match:
                 host, owner, repo = match.groups()
-                platform = 'github' if 'github' in host.lower() else 'gitlab' if 'gitlab' in host.lower() else 'unknown'
+                platform = _platform_of(host)
                 return {'host': host, 'owner': owner, 'repo': repo, 'platform': platform}
 
         logger.warning(f"Could not parse git URL: {git_url}")
         return None
 
-    def _request_tags(self, parsed: dict[str, str]) -> requests.Response:
-        """Build and perform the tags request for the parsed repository.
-
-        Constructs the provider-specific tags URL and headers (GitHub vs.
-        GitLab, including auth token handling) and issues the GET request,
-        returning the raw response for the caller to interpret.
-        """
+    def _api_headers(self, parsed: dict[str, str]) -> dict[str, str]:
+        """Provider-specific auth headers (GitHub vs. GitLab)."""
         if parsed['platform'] == 'github':
-            api_url = f"https://api.github.com/repos/{parsed['owner']}/{parsed['repo']}/tags"
-            headers = {
+            return {
                 'Authorization': f"token {self.token}",
                 'Accept': 'application/vnd.github.v3+json',
             }
-        else:  # gitlab
-            project_path = quote(f"{parsed['owner']}/{parsed['repo']}", safe='')
-            api_url = f"https://{parsed['host']}/api/v4/projects/{project_path}/repository/tags"
-            headers = {'PRIVATE-TOKEN': self.token}
+        return {'PRIVATE-TOKEN': self.token}
 
-        return self._session.get(api_url, headers=headers, timeout=10)
+    def _api_url(self, parsed: dict[str, str], resource: str) -> str:
+        """URL of ``tags`` or ``releases`` for the parsed repository."""
+        if parsed['platform'] == 'github':
+            return f"https://api.github.com/repos/{parsed['owner']}/{parsed['repo']}/{resource}"
+        project_path = quote(f"{parsed['owner']}/{parsed['repo']}", safe='')
+        return f"https://{parsed['host']}/api/v4/projects/{project_path}/{resource}"
+
+    def _request_tags(self, parsed: dict[str, str]) -> requests.Response:
+        """Build and perform the tags request for the parsed repository.
+
+        Issues the GET for the first page and returns the raw response for the
+        caller to interpret; further pages come from :meth:`_all_pages`.
+        """
+        return self._session.get(
+            self._api_url(parsed, 'tags'),
+            headers=self._api_headers(parsed),
+            params={'per_page': _PAGE_SIZE},
+            timeout=10,
+        )
+
+    def _all_pages(
+        self, response: requests.Response, headers: dict[str, str], url: str
+    ) -> list[Any]:
+        """Items of ``response`` and of every page that follows it.
+
+        Both providers announce the next page in the ``Link`` header, which
+        ``requests`` parses into ``response.links``. Without this only the first
+        page was read: 30 tags on GitHub, 20 on GitLab. A next link is followed
+        only if it stays on the host of ``url``: the headers carry the platform
+        token. The loop is bounded by ``_MAX_PAGES``.
+        """
+        items = list(response.json())
+        host = urlparse(url).netloc
+        for _ in range(_MAX_PAGES - 1):
+            next_url = (response.links.get('next') or {}).get('url')
+            if not next_url:
+                return items
+            if urlparse(next_url).netloc != host:
+                logger.warning("Not following a pagination link to another host: %s", next_url)
+                return items
+            response = self._session.get(next_url, headers=headers, timeout=10)
+            response.raise_for_status()
+            items.extend(response.json())
+        if (response.links.get('next') or {}).get('url'):
+            logger.warning("Stopped after %d pages of %s", _MAX_PAGES, url)
+        return items
 
     def _fetch_github_tags(self, parsed: dict[str, str]) -> list[dict[str, Any]]:
         """Fetch all tags from GitHub API."""
@@ -106,15 +242,18 @@ class GitService:
             return []
 
         response.raise_for_status()
-        return [{'version': tag['name'], 'commit': tag['commit']['sha'][:8], 'type': 'tag'} for tag in response.json()]
+        tags = self._all_pages(response, self._api_headers(parsed), self._api_url(parsed, 'tags'))
+        return [
+            {'version': tag['name'], 'commit': tag['commit']['sha'][:8], 'type': 'tag'}
+            for tag in tags
+        ]
 
     def _fetch_github_releases(self, parsed: dict[str, str]) -> dict[str, dict[str, Any]]:
         """Fetch releases from GitHub API."""
-        api_url = f"https://api.github.com/repos/{parsed['owner']}/{parsed['repo']}/releases"
+        api_url = self._api_url(parsed, 'releases')
+        headers = self._api_headers(parsed)
         response = self._session.get(
-            api_url,
-            headers={'Authorization': f"token {self.token}", 'Accept': 'application/vnd.github.v3+json'},
-            timeout=10
+            api_url, headers=headers, params={'per_page': _PAGE_SIZE}, timeout=10
         )
 
         if response.status_code == 404:
@@ -130,7 +269,7 @@ class GitService:
                 'prerelease': str(release.get('prerelease', False)),
                 'html_url': release.get('html_url', ''),
             }
-            for release in response.json() if release.get('tag_name')
+            for release in self._all_pages(response, headers, api_url) if release.get('tag_name')
         }
 
     def _fetch_gitlab_tags(self, parsed: dict[str, str]) -> list[dict[str, Any]]:
@@ -141,16 +280,18 @@ class GitService:
             return []
 
         response.raise_for_status()
-        return [{'version': tag['name'], 'commit': tag['commit']['id'][:8], 'type': 'tag'} for tag in response.json()]
+        tags = self._all_pages(response, self._api_headers(parsed), self._api_url(parsed, 'tags'))
+        return [
+            {'version': tag['name'], 'commit': tag['commit']['id'][:8], 'type': 'tag'}
+            for tag in tags
+        ]
 
     def _fetch_gitlab_releases(self, parsed: dict[str, str]) -> dict[str, dict[str, Any]]:
         """Fetch releases from GitLab API."""
-        project_path = quote(f"{parsed['owner']}/{parsed['repo']}", safe='')
-        api_url = f"https://{parsed['host']}/api/v4/projects/{project_path}/releases"
+        api_url = self._api_url(parsed, 'releases')
+        headers = self._api_headers(parsed)
         response = self._session.get(
-            api_url,
-            headers={'PRIVATE-TOKEN': self.token},
-            timeout=10
+            api_url, headers=headers, params={'per_page': _PAGE_SIZE}, timeout=10
         )
 
         if response.status_code == 404:
@@ -166,7 +307,7 @@ class GitService:
                 'prerelease': 'False',
                 'html_url': release.get('_links', {}).get('self', ''),
             }
-            for release in response.json() if release.get('tag_name')
+            for release in self._all_pages(response, headers, api_url) if release.get('tag_name')
         }
 
     def _accept_github_invite(self, parsed: dict[str, str]) -> dict[str, Any]:
@@ -280,7 +421,10 @@ class GitService:
             if not parsed or parsed['platform'] == 'unknown':
                 return {
                     'success': False,
-                    'message': f"Unable to parse repository URL or unsupported platform. Supported: GitHub, GitLab. URL: {git_url}"
+                    'message': (
+                        "Unable to parse repository URL or unsupported platform. "
+                        f"Allowed hosts: {', '.join(sorted(_allowed_hosts()))}. URL: {git_url}"
+                    )
                 }
 
             if not self.token:
@@ -417,14 +561,7 @@ class GitService:
                 if v['version'] in releases:
                     v.update(releases[v['version']])
 
-            # Sort by semantic versioning
-            def sort_key(v):
-                try:
-                    return tuple(map(int, v['version'].lstrip('v').split('.')))
-                except (ValueError, AttributeError):
-                    return (v['version'],)
-
-            versions.sort(key=sort_key, reverse=True)
+            versions.sort(key=_version_sort_key, reverse=True)
             logger.info(f"Found {len(versions)} versions")
             return versions
 

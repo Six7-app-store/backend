@@ -7,7 +7,7 @@ Pure functions — no Git clone, no FastAPI app, no DB.
 """
 import pytest
 
-from app.routers.apps import _allowed_values, _number_range, _parse_one_variable
+from app.services.hcl_variable_parser import _allowed_values, _number_range, _parse_one_variable
 
 
 def _parse(block: str, name: str = "ip_mode") -> dict:

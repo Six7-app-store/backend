@@ -18,18 +18,11 @@ if config.config_file_name is not None:
 # target_metadata = mymodel.Base.metadata
 from app.database import Base
 
-# Import the models module so that all model classes are registered
-# on Base.metadata. Avoid importing specific model names here because
-# models may be renamed/removed; importing the module is more robust
-# for autogenerate.
-try:
-    import importlib
-
-    importlib.import_module("app.models")
-except Exception:
-    # If models cannot be imported here (e.g. during certain checks),
-    # we still set target_metadata to Base.metadata so offline mode can run.
-    pass
+# Import the models module so that all model classes are registered on
+# Base.metadata. Do NOT swallow an import error here: without the models the
+# metadata is empty, and ``alembic revision --autogenerate`` would then propose
+# dropping every table.
+import app.models  # noqa: E402, F401
 
 target_metadata = Base.metadata
 
