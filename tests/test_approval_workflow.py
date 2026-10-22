@@ -78,7 +78,7 @@ def test_submit_version_duplicate_pending_returns_409(client, mock_user, db):
 def test_resubmit_after_rejection_succeeds(client, mock_admin, mock_user, db):
     app_obj = create_app_in_db(db, mock_user)
     crud_approvals.submit_version(db, app_obj.appId, "v1.0")
-    crud_approvals.reject(db, app_obj.appId, "v1.0", mock_admin.userId, "bad terraform")
+    crud_approvals.reject(db, app_obj.appId, "v1.0", mock_admin.userId, "bad tofu")
 
     resp = client.post(f"/apps/{app_obj.appId}/versions/v1.0/submit", json={})
     assert resp.status_code == 201
@@ -95,7 +95,7 @@ def test_submit_blocked_when_marker_errors(client, mock_user, db):
     broken_vars = [{"name": "flavor", "markerError": {
         "variable": "flavor",
         "message": "Unknown OS type: 'flaavoor'. Did you mean 'flavor'?",
-        "location": "terraform/variables.tf:5",
+        "location": "tofu/variables.tofu:5",
         "code": "MARKER_UNKNOWN_OS_TYPE",
     }}]
     with patch("app.routers.apps.load_variable_definitions", return_value=broken_vars):

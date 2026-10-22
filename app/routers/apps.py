@@ -99,21 +99,20 @@ class AppVariableResponse(BaseModel):
     # deliberately broad because HCL covers a whole literal family.
     default: Any | None = None
     required: bool
-    source: str
     osType: str | None = None
     osMode: str | None = None
     osMulti: bool | None = None
     osScope: str | None = None
     varScope: str | None = None
     fileExtensions: list[str] | None = None
+    # Closed value set read from ``validation { condition = contains([...],
+    # var.x) }``; the wizard renders a dropdown instead of free text.
+    allowedValues: list[Any] | None = None
+    # Inclusive bounds read from ``validation { condition = var.x >= 1 &&
+    # var.x <= 9 }``; the wizard sets them as ``min``/``max`` on the input.
+    minValue: int | float | None = None
+    maxValue: int | float | None = None
     markerError: _MarkerErrorPayload | None = None
-    # ``template_key`` is null for ``source = terraform`` variables and
-    # carries the per-template key (``default`` for the legacy layout,
-    # or the subdirectory name like ``webserver``/``database`` in
-    # multi-image apps) for ``source = packer`` variables. Lets the
-    # wizard group Packer variables per image and avoid name collisions
-    # across templates.
-    template_key: str | None = None
 
 
 # ----------------------------------------------------------------
@@ -136,6 +135,9 @@ def list_apps(
         apps = crud_apps.get_apps(db, skip=skip, limit=limit)
     else:
         apps = crud_apps.get_visible_apps(db, current_user.userId, skip=skip, limit=limit)
+    latest = crud_approvals.latest_approved_versions(db, [a.appId for a in apps])
+    for a in apps:
+        a.latestApprovedVersion = latest.get(a.appId)
     return [_serialize_app(a) for a in apps]
 
 
@@ -175,6 +177,7 @@ def get_app(
     else:
         app.versions = []
 
+    app.latestApprovedVersion = crud_approvals.latest_approved_version(db, app.appId)
     return _serialize_app(app)
 
 
@@ -190,7 +193,7 @@ def get_app_variables(
 ):
     """
     Get dynamic app variables from app's Git repository
-    Parses variables.tf file and returns all configurable variables
+    Parses tofu/variables.tofu and returns all configurable variables
 
     Returns:
     - name: Variable name

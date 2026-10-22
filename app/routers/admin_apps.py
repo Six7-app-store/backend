@@ -49,7 +49,7 @@ def approve_version(
 ):
     """Approve a PENDING version — makes it deployable by all users.
 
-    Validates the ``@openstack`` markers in this version's Terraform/Packer
+    Validates the ``@openstack`` markers in this version's OpenTofu
     variable files before flipping the status, using the same helper as
     ``GET /apps/{id}/variables``.
     """

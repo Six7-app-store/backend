@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import logging
 
+import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError, jwt
+from jwt import InvalidTokenError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -43,8 +44,10 @@ _INVALID = HTTPException(
 def _peek_claims(token: str) -> dict:
     """Read claims without verifying, to pick the right verifier."""
     try:
-        return jwt.get_unverified_claims(token)
-    except JWTError as e:
+        # Nothing is verified here - not even exp. The verifier picked from
+        # the claims checks everything.
+        return jwt.decode(token, options={"verify_signature": False})
+    except InvalidTokenError as e:
         logger.info("Bearer token is not a readable JWT: %s", e)
         raise _INVALID from e
 

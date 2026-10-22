@@ -405,7 +405,7 @@ def _deploy(client, app, tag):
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("tag", ["v2-pending", "v3-rejected", "v9-unbekannt", None])
+@pytest.mark.parametrize("tag", ["v2-pending", "v3-rejected", "v9-unbekannt"])
 def test_non_owner_cannot_deploy_unapproved_version(db, celery_stub, tag):
     """A-05: ``has_approved_version`` existierte, wurde aber nie aufgerufen.
     Geprüft wurde nur, ob die App *irgendeine* freigegebene Version hat."""
@@ -421,6 +421,24 @@ def test_non_owner_cannot_deploy_unapproved_version(db, celery_stub, tag):
         r = _deploy(c, app, tag)
 
     assert r.status_code == 403, r.text
+    celery_stub.assert_not_called()
+
+
+@pytest.mark.integration
+def test_non_owner_cannot_deploy_without_version(db, celery_stub):
+    """A-05 ohne Tag: abgelehnt wird schon vor der Freigabeprüfung, mit dem
+    Grund, den der Wizard anzeigt — einen Rückfall auf "main" gibt es nicht."""
+    owner = _user(db, UserRole.TEACHER)
+    teacher = _user(db, UserRole.TEACHER)
+    _credentials(db, teacher)
+    app = _app(db, owner)
+    _approval(db, app, "v1", AppVersionApprovalStatus.APPROVED)
+
+    with as_user(teacher) as c:
+        r = _deploy(c, app, None)
+
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"]["reason"] == "version_required"
     celery_stub.assert_not_called()
 
 

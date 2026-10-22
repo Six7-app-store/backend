@@ -7,7 +7,7 @@ importantly — the guarantee that a member never receives a teammate's
 credentials in the response.
 
 Unlike the resend-access tests, the notifier is NOT patched out here:
-we seed a real successful DEPLOY task carrying terraform ``user_accounts``
+we seed a real successful DEPLOY task carrying tofu ``user_accounts``
 outputs and assert on the extracted, filtered response so the end-to-end
 extraction path (crud → notifier._find_account_for_user) is exercised.
 """
@@ -51,7 +51,7 @@ def _seed_deployment_with_outputs(db, owner, members, *, outputs=None, team_name
         appId=app.appId,
         userId=owner.userId,
         releaseTag="v1.0.0",
-        userInputVar=json.dumps({"terraform": {}, "packer": {}}),
+        userInputVar=json.dumps({"tofu": {}}),
     )
     db.add(deployment)
     db.flush()
@@ -90,7 +90,7 @@ def _seed_deployment_with_outputs(db, owner, members, *, outputs=None, team_name
 
 
 def _outputs_for(team_name, *accounts):
-    """Build a terraform-outputs dict with a ``user_accounts`` map.
+    """Build a tofu-outputs dict with a ``user_accounts`` map.
 
     Each ``accounts`` entry is ``(key_suffix, username, password)``; the
     map key is ``"<team>-<key_suffix>"`` mirroring the template contract.
@@ -165,6 +165,34 @@ def test_my_access_never_leaks_teammate_credentials(client, db, mock_user, mock_
     serialised = json.dumps(response.json())
     assert "Team-1-owner" not in serialised
     assert "pw-owner-SECRET" not in serialised
+
+
+@pytest.mark.integration
+def test_my_access_ignores_a_teammate_account_listed_first(client, db, mock_user, mock_student):
+    """A teammate's account must not match the caller just because it
+    comes first in the outputs. Each account carries its own
+    ``username``; were that counted as one of the caller's names, every
+    account would match itself and the first one would win. Real
+    templates name the key after the username, as the teammate here."""
+    outputs = _outputs_for(
+        "Team-1",
+        ("owneruser", "owneruser", "pw-owner-SECRET"),
+        ("student", "student", "s3cret-student"),
+    )
+    deployment, _team = _seed_deployment_with_outputs(
+        db, owner=mock_user, members=[mock_student, mock_user], outputs=outputs,
+    )
+
+    from app.main import app as fastapi_app
+    from app.utils.auth import get_current_user
+    fastapi_app.dependency_overrides[get_current_user] = lambda: mock_student
+
+    response = client.get(f"/deployments/{deployment.deploymentId}/my-access")
+
+    assert response.status_code == 200, response.text
+    accounts = response.json()["user_accounts"]
+    assert list(accounts) == ["Team-1-student"]
+    assert accounts["Team-1-student"]["auth"] == "s3cret-student"
 
 
 @pytest.mark.integration

@@ -7,7 +7,7 @@ Two flavours:
 * ``send_owner_mail(...)`` — one mail to the deployment owner with
   every team's VM data and every user's credentials in one place.
 
-Both consume the worker's terraform outputs (``team_vms``,
+Both consume the worker's tofu outputs (``team_vms``,
 ``user_accounts``, ``teams_summary``) plus the deployment's team/user
 membership from the DB. The output shape is documented inline below
 so a future template change doesn't have to re-discover it from a
@@ -61,8 +61,8 @@ def _display_name(user: User) -> str:
 # Outputs parsing
 # ----------------------------------------------------------------------------
 #
-# Worker tasks return ``terraform_outputs`` as the raw JSON object
-# Terraform's ``output -json`` produces, i.e. each top-level key is an
+# Worker tasks return ``tofu_outputs`` as the raw JSON object
+# OpenTofu's ``output -json`` produces, i.e. each top-level key is an
 # output name with ``{value, type, sensitive}`` underneath. We only care
 # about the ``value`` of three well-known outputs from the Online-IDE
 # template (and any template that follows the same conventions):
@@ -215,6 +215,17 @@ def _resolve_protocol(raw: dict[str, Any], *, has_team_url: bool = False) -> str
     return "ssh"
 
 
+def _host_for_port(ip: str) -> str:
+    """Wrap a bare IPv6 address in brackets so ``host:port`` stays parseable.
+
+    ``2001:db8::1:3389`` is ambiguous, ``[2001:db8::1]:3389`` is not. IPv4
+    and already bracketed addresses pass through unchanged.
+    """
+    if ":" in ip and not ip.startswith("["):
+        return f"[{ip}]"
+    return ip
+
+
 def _connect_string(protocol: str, raw: dict[str, Any], url: str | None) -> str | None:
     """Build the one line a user can copy to reach their machine.
 
@@ -236,9 +247,9 @@ def _connect_string(protocol: str, raw: dict[str, Any], url: str | None) -> str 
         if not ip:
             return None
         default_port = 3389 if protocol == "rdp" else 5900
-        return f"{ip}:{port or default_port}"
+        return f"{_host_for_port(ip)}:{port or default_port}"
     if protocol == "web":
-        return url or (f"http://{ip}:{port}" if ip and port else None)
+        return url or (f"http://{_host_for_port(ip)}:{port}" if ip and port else None)
     return None
 
 
@@ -248,7 +259,7 @@ def _normalise_account_key(value: str | None) -> str:
     Worker templates derive Linux-friendly account names from emails
     by replacing every non-``[a-z0-9]`` character with a single ``-``.
     A user with email ``luca.baeck@gmail.com`` becomes ``luca-baeck``
-    in the terraform output, while our DB has ``luca`` as the
+    in the tofu output, while our DB has ``luca`` as the
     username and ``luca.baeck`` as the email's local-part. Comparing
     those literally misses every match where the template applied any
     transformation. We collapse ``.``/``-``/``_``/spaces to a single
@@ -297,7 +308,7 @@ def _find_account_for_user(
     alongside the untouched account dict — or ``None``. Kept separate
     from :func:`_access_for_user` so callers that need the raw entry
     (e.g. the per-member ``/my-access`` endpoint, whose response mirrors
-    the terraform ``user_accounts`` shape) reuse the exact same matching
+    the tofu ``user_accounts`` shape) reuse the exact same matching
     logic as the mail path without re-deriving the normalised form.
     """
     accounts = _user_accounts(outputs)
@@ -321,10 +332,10 @@ def _find_account_for_user(
         normalised_key = _normalise_account_key(key)
         suffix = normalised_key[len(team_prefix):] if normalised_key.startswith(team_prefix) else normalised_key
 
-        candidates_with_inner_username = candidates | {_normalise_account_key(raw.get("username"))}
-        candidates_with_inner_username.discard("")
-
-        if suffix in candidates_with_inner_username:
+        # The account's own ``username`` is a second name for the same
+        # account, so it is checked against the user's candidates — never
+        # added to them, or every account would match itself.
+        if suffix in candidates or _normalise_account_key(raw.get("username")) in candidates:
             return key, raw
     return None
 
@@ -488,7 +499,7 @@ def _send_owner_mail(
 def notify_deployment_succeeded(
     db: Session,
     deployment_id: UUID,
-    terraform_outputs: dict[str, Any] | None,
+    tofu_outputs: dict[str, Any] | None,
 ) -> None:
     """Top-level entry point — call from the celery event listener
     after a successful DEPLOY task.
@@ -511,9 +522,9 @@ def notify_deployment_succeeded(
         )
         return
 
-    if not terraform_outputs:
+    if not tofu_outputs:
         logger.info(
-            "notify: deployment %s has no terraform outputs, skipping mails",
+            "notify: deployment %s has no tofu outputs, skipping mails",
             deployment_id,
         )
         return
@@ -534,7 +545,7 @@ def notify_deployment_succeeded(
         members = [refresh_user_from_keycloak(db, m) for m in members]
         member_payload: list[dict[str, Any]] = []
         for member in members:
-            access = _access_for_user(terraform_outputs, team.name, member)
+            access = _access_for_user(tofu_outputs, team.name, member)
             if access is None:
                 # No credential output for this user — still include
                 # them in the owner summary so the owner sees who's on
@@ -577,7 +588,7 @@ def notify_deployment_succeeded(
 
         teams_payload.append({
             "name": team.name,
-            "vm": _vm_for_team(terraform_outputs, team.name),
+            "vm": _vm_for_team(tofu_outputs, team.name),
             "members": member_payload,
         })
 
@@ -616,7 +627,7 @@ def resend_user_access(
     """Re-send the access mail for one specific user of a deployment.
 
     Loads the deployment's latest successful DEPLOY task to recover
-    the original ``terraform_outputs`` (those carry the user-specific
+    the original ``tofu_outputs`` (those carry the user-specific
     credentials), then sends the same per-user mail
     ``notify_deployment_succeeded`` would have sent — to that user
     only. Used by the "Resend access" button in the Teams card on the
@@ -697,7 +708,7 @@ def get_user_access(
     deployment_id: UUID,
     user_id: UUID,
 ) -> dict[str, Any] | None:
-    """Return the terraform output slices a single member is allowed to see.
+    """Return the tofu output slices a single member is allowed to see.
 
     Powers the ``GET /deployments/{id}/my-access`` endpoint: a team member
     (typically a student) may retrieve THEIR OWN access credentials without
@@ -705,7 +716,7 @@ def get_user_access(
     own account entry is ever returned — teammates' credentials are never
     included.
 
-    The result mirrors the raw terraform ``user_accounts`` / ``team_vms``
+    The result mirrors the raw tofu ``user_accounts`` / ``team_vms``
     output shape (one key each: the member's account and their team's VM)
     so the frontend's existing account-matching pipeline consumes it
     unchanged:

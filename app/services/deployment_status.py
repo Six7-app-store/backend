@@ -1,6 +1,6 @@
 """Live-status joiner for the deployment Infrastructure tab.
 
-Marries the cached Terraform state (parsed by ``tf_state_parser``)
+Marries the cached OpenTofu state (parsed by ``tofu_state_parser``)
 with live OpenStack data via the per-user ``Connection`` helper from
 ``openstack_client``. Two stages, one per endpoint:
 
@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 
 from app.models import User
 from app.services.openstack_client import user_connection
-from app.services.tf_state_parser import TfResource, parse_tf_state
+from app.services.tofu_state_parser import TfResource, parse_tf_state
 
 logger = logging.getLogger(__name__)
 

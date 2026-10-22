@@ -1,4 +1,4 @@
-"""Parse Terraform and Packer HCL variable definitions from app repositories.
+"""Parse OpenTofu HCL variable definitions from app repositories.
 
 Extracts ``variable "..." { ... }`` blocks, resolves ``@openstack:*`` marker
 annotations, and returns the normalised variable shape the wizard and the
@@ -8,7 +8,8 @@ Public API:
   - ``load_variable_definitions(app, version)`` — clone + parse, called by
     both ``GET /apps/{id}/variables`` and ``POST /deployments``.
   - ``MarkerError``  — marker parse failure (attached per-variable, not raised).
-  - ``PackerTemplateDiscoveryError`` — ambiguous Packer layout (raised to HTTP 422).
+  - ``TOFU_VARIABLES_FILE`` — where a release keeps its variables; a release
+    without it is answered with HTTP 422.
 """
 
 from __future__ import annotations
@@ -20,7 +21,6 @@ import logging
 import os
 import re
 import uuid
-from dataclasses import dataclass
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 #   <var_scope> — 'all' | 'team' | 'user' (default 'all'). Controls
 #              whether the wizard renders one input (``all``), one per
 #              team, or one per user. ``team``/``user`` require a
-#              ``map(...)`` HCL type. Packer variables allow only ``all``.
+#              ``map(...)`` HCL type.
 #
 # Examples:
 #     @openstack:network                    → network, name-mode, multi from HCL
@@ -91,7 +91,7 @@ _OS_TYPES: set[str] = {
     "availability_zone",
     # ``file`` is a special pseudo-resource: it doesn't pick from a
     # remote OpenStack API, it tells the wizard to render a file-upload
-    # widget and route the bytes into ``userInputVar.terraform`` so the
+    # widget and route the bytes into ``userInputVar.tofu`` so the
     # template can drop them onto the VM via cloud-init ``write_files``.
     # The mode slot carries the scope (``all``/``team``/``user``); the
     # multi slot carries the mandatory extension filter (e.g. ``pdf`` or
@@ -223,24 +223,6 @@ def _parse_var_scope(var_name: str, slot: str | None) -> str | None:
     )
 
 
-def _forbid_packer_team_user_scope(var_name: str, source: str, var_scope: str | None) -> None:
-    """Reject ``team``/``user`` scopes on packer variables.
-
-    Packer builds ONE image shared by all later VMs/teams/users, so a
-    per-team/per-user value would have no effect. Called from both the
-    scope-only and resource marker paths.
-    """
-    if source == "packer" and var_scope in ("team", "user"):
-        raise MarkerError(
-            var_name,
-            f"packer-Variablen unterstützen nur ``var_scope = all``; "
-            f"angegeben: '{var_scope}'. Begründung: Packer baut EIN "
-            f"Image, das von allen späteren VMs/Teams/Usern geteilt "
-            f"wird — ein Per-Team-Wert hätte keine Wirkung.",
-            code="MARKER_PACKER_SCOPE_FORBIDDEN",
-        )
-
-
 def _reject_malformed_markers(var_name: str, description: str) -> None:
     """Raise ``MarkerError`` for the malformed-marker shapes a plain
     regex match would silently swallow.
@@ -345,7 +327,7 @@ def _select_marker(var_name: str, description: str):
 
 
 def _parse_scope_only_marker(
-    var_name: str, source: str, raw_mode: str | None, raw_multi: str | None, raw_scope: str | None
+    var_name: str, raw_mode: str | None, raw_multi: str | None, raw_scope: str | None
 ):
     """Parse a scope-only marker (empty type slot, e.g. ``@openstack:::team``).
 
@@ -375,12 +357,11 @@ def _parse_scope_only_marker(
             "(z.B. ``@openstack:::team``)",
             code="MARKER_EMPTY",
         )
-    _forbid_packer_team_user_scope(var_name, source, var_scope)
     return (None, None, None, None, var_scope, None)
 
 
 def _parse_file_marker(
-    var_name: str, source: str, raw_mode: str | None, raw_multi: str | None, raw_scope: str | None
+    var_name: str, raw_mode: str | None, raw_multi: str | None, raw_scope: str | None
 ):
     """Parse a ``@openstack:file`` marker.
 
@@ -389,19 +370,6 @@ def _parse_file_marker(
     MANDATORY extension filter (``pdf`` or ``pdf|docx``). Handled
     separately so the generic mode/multi logic stays untouched.
     """
-    if source == "packer":
-        # Packer builds an image — file variables would never reach the
-        # build (the files path today merges hard-coded into
-        # ``userInputVar.terraform``). Rather than a silent trap: a
-        # marker error.
-        raise MarkerError(
-            var_name,
-            "``@openstack:file`` ist in Packer-Variablen nicht "
-            "unterstützt — Dateien werden ausschließlich im "
-            "Terraform-Pfad zugestellt",
-            code="MARKER_FILE_PACKER_FORBIDDEN",
-        )
-
     file_scope: str | None = None
     if raw_mode is not None and raw_mode != "":
         rs = raw_mode.lower()
@@ -604,7 +572,6 @@ def _check_multi_type_conflict(
 def _parse_resource_marker(
     var_name: str,
     var_type: str,
-    source: str,
     os_type: str,
     raw_mode: str | None,
     raw_multi: str | None,
@@ -621,12 +588,11 @@ def _parse_resource_marker(
     type_for_collection_check = _collection_check_type(type_lower, var_scope)
     _check_multi_type_conflict(var_name, var_type, type_for_collection_check, multi)
 
-    _forbid_packer_team_user_scope(var_name, source, var_scope)
     return (os_type, mode, multi, None, var_scope, None)
 
 
 def _parse_marker(
-    var_name: str, var_type: str, description: str, source: str = "terraform"
+    var_name: str, var_type: str, description: str
 ) -> tuple[str | None, str | None, bool | None, str | None, str | None, list[str] | None]:
     """
     Parse the ``@openstack:<type>[:<mode>][:<multi>][:<var_scope>]`` marker
@@ -647,7 +613,6 @@ def _parse_marker(
         ``:team``/``:user`` with ``type = string``)
       - file-specific: invalid scope, missing extension filter, or an
         invalid filter.
-      - packer source with ``var_scope in {team, user}``.
 
     Returns: ``(os_type, mode, multi, file_scope, var_scope, file_exts)``.
 
@@ -679,13 +644,13 @@ def _parse_marker(
     os_type: str | None = raw_type.lower() if raw_type else None
 
     if os_type is None:
-        return _parse_scope_only_marker(var_name, source, raw_mode, raw_multi, raw_scope)
+        return _parse_scope_only_marker(var_name, raw_mode, raw_multi, raw_scope)
 
     if os_type == "file":
-        return _parse_file_marker(var_name, source, raw_mode, raw_multi, raw_scope)
+        return _parse_file_marker(var_name, raw_mode, raw_multi, raw_scope)
 
     return _parse_resource_marker(
-        var_name, var_type, source, os_type, raw_mode, raw_multi, raw_scope
+        var_name, var_type, os_type, raw_mode, raw_multi, raw_scope
     )
 
 
@@ -780,15 +745,15 @@ def _validate_scoped_var_shape(var_name: str, var_type: str, scope: str) -> None
     has a map-typed HCL declaration.
 
     Reasoning: bei ``team``/``user``-Scope schickt der Wizard eine Map
-    (slot_key → value) an Terraform/Packer. Wenn der HCL-Type ein
-    Skalar ist (``string``, ``number``, ...), würde Terraform die Map
+    (slot_key → value) an OpenTofu. Wenn der HCL-Type ein
+    Skalar ist (``string``, ``number``, ...), würde OpenTofu die Map
     beim Apply ablehnen. Wir fangen das hier ab, damit der App-Autor
     den Fehler bei ``GET /apps/{id}/variables`` sieht und nicht erst
     beim ersten Deploy.
 
     Bei ``scope = all`` (oder fehlendem Scope) gilt das nicht — dann
     rendert der Wizard genau EIN Eingabefeld, das wie heute direkt
-    als Skalar oder Liste an Terraform durchgereicht wird.
+    als Skalar oder Liste an OpenTofu durchgereicht wird.
     """
     if scope not in ("team", "user"):
         return
@@ -809,7 +774,7 @@ def _coerce_hcl_default(raw_default: str, var_type: str) -> tuple[Any, bool]:
     """Coerce an HCL default literal into its Python equivalent so the
     frontend sees ``default = 2`` as ``2`` (number) rather than ``"2"``
     (string). Returns ``(value, required)`` — an HCL ``null`` default
-    yields ``None`` AND ``required = True`` (Terraform treats null as "no
+    yields ``None`` AND ``required = True`` (OpenTofu treats null as "no
     default").
 
     Robust against minor whitespace and trailing commas; any parse error
@@ -880,6 +845,85 @@ def _coerce_hcl_default(raw_default: str, var_type: str) -> tuple[Any, bool]:
     return (stripped, False)
 
 
+def _allowed_values(var_name: str, var_block: str) -> list[Any] | None:
+    """Closed value set from a ``validation`` block, if the variable has one.
+
+    Recognises the idiom Terraform authors use for enums::
+
+        validation {
+          condition     = contains(["ipv4", "ipv6", "dual"], var.ip_mode)
+          error_message = "..."
+        }
+
+    optionally with the list wrapped in ``toset(...)``/``tolist(...)``.
+    Only string/number/bool literals count: anything referring to a
+    local or another variable is not knowable here, so the variable
+    stays free text and Terraform remains the only check. Returns
+    ``None`` when there is no such validation.
+    """
+    pattern = (
+        r"contains\(\s*(?:to(?:set|list)\(\s*)?\[([^\]]*)\]\s*\)?\s*,\s*var\."
+        + re.escape(var_name)
+        + r"\s*\)"
+    )
+    match = re.search(pattern, var_block)
+    if not match:
+        return None
+    # HCL tolerates a trailing comma, JSON doesn't.
+    inner = re.sub(r",\s*$", "", match.group(1).strip())
+    try:
+        values = json.loads(f"[{inner}]")
+    except (ValueError, TypeError):
+        return None
+    if not values or not all(isinstance(v, (str, int, float, bool)) for v in values):
+        return None
+    return values
+
+
+_NUMBER_LITERAL = r"(-?\d+(?:\.\d+)?)"
+
+
+def _number_range(
+    var_name: str, var_block: str
+) -> tuple[int | float | None, int | float | None]:
+    """Inclusive bounds of a number variable from its ``validation`` block.
+
+    Recognises the range idiom, in either operand order::
+
+        validation {
+          condition     = var.disk_gb >= 0 && var.disk_gb <= 200
+          error_message = "..."
+        }
+
+    Only ``>=``/``<=`` against a number literal count. A strict ``>``
+    or ``<`` has no exact counterpart in the wizard's ``min``/``max`` for
+    non-integers, and a bound referring to a local is not knowable here;
+    both leave OpenTofu as the only check. Returns ``(None, None)`` when
+    the block has no such bound.
+    """
+    var = r"var\." + re.escape(var_name) + r"\b"
+    lower = upper = None
+
+    def _num(raw: str) -> int | float:
+        value = float(raw)
+        return int(value) if value.is_integer() else value
+
+    for pattern, is_lower in (
+        (var + r"\s*>=\s*" + _NUMBER_LITERAL, True),
+        (_NUMBER_LITERAL + r"\s*<=\s*" + var, True),
+        (var + r"\s*<=\s*" + _NUMBER_LITERAL, False),
+        (_NUMBER_LITERAL + r"\s*>=\s*" + var, False),
+    ):
+        match = re.search(pattern, var_block)
+        if not match:
+            continue
+        if is_lower:
+            lower = _num(match.group(1))
+        else:
+            upper = _num(match.group(1))
+    return lower, upper
+
+
 def _parse_one_variable(
     *,
     var_name: str,
@@ -887,7 +931,6 @@ def _parse_one_variable(
     var_block_offset: int,
     file_content: str,
     file_label: str,
-    source: str,
 ) -> dict[str, Any]:
     """
     Process a single ``variable "..." { ... }`` block.
@@ -927,8 +970,20 @@ def _parse_one_variable(
         "description": description,
         "default": default_value,
         "required": required,
-        "source": source,
     }
+
+    # A closed value set turns the free-text input into a dropdown. It
+    # coexists with markers: on an ``@openstack`` variable the resource
+    # picker offers only these values, e.g. the flavors an app allows.
+    allowed = _allowed_values(var_name, var_block)
+    if allowed is not None:
+        var_info["allowedValues"] = allowed
+
+    lower, upper = _number_range(var_name, var_block)
+    if lower is not None:
+        var_info["minValue"] = lower
+    if upper is not None:
+        var_info["maxValue"] = upper
 
     # Evaluate @openstack markers. Per-variable try/except: a typo in ONE
     # variable description must not block the whole wizard; the error
@@ -941,11 +996,11 @@ def _parse_one_variable(
             file_scope,
             var_scope,
             file_exts,
-        ) = _parse_marker(var_name, var_type, description, source=source)
+        ) = _parse_marker(var_name, var_type, description)
         # File variables have a hard contract with cloud-init: the wizard
         # must know whether to render a single slot (scope=all), a map
         # over teams, or a map over users. The HCL type nesting must match
-        # the scope or Terraform rejects the decode at apply — we catch it
+        # the scope or OpenTofu rejects the decode at apply — we catch it
         # here and give the author a clear error.
         if os_type == "file":
             _validate_file_var_shape(var_name, var_type, file_scope or "all")
@@ -1029,193 +1084,35 @@ def _iter_variable_blocks(content: str):
         yield var_name, var_block, block_offset
 
 
-def _parse_terraform_variables(file_path: str) -> list[dict[str, Any]]:
-    """Parse Terraform `variables.tf` file. Per-variable marker errors
-    travel in the ``markerError`` field (not raised) — see
+# Path of the variables file inside an app repo. The app contract is
+# OpenTofu-only: one ``tofu/`` directory, no Packer (see ADR 0010 in the
+# deployment repository). ``git_service.SPARSE_CHECKOUT_FILES`` fetches
+# exactly this file for the variable scan.
+TOFU_VARIABLES_FILE = os.path.join("tofu", "variables.tofu")
+
+
+def _parse_tofu_variables(file_path: str) -> list[dict[str, Any]]:
+    """Parse an OpenTofu ``variables.tofu`` file. Per-variable marker
+    errors travel in the ``markerError`` field (not raised) — see
     ``_parse_one_variable``."""
     with open(file_path) as f:
         content = f.read()
 
     variables = []
     for var_name, var_block, block_offset in _iter_variable_blocks(content):
-        # Filter: drop ``users`` and ``image_name``
-        if var_name == "users" or var_name == "image_name":
-            continue
-        # Multi-image apps declare ``image_name_<key>`` per template and
-        # mark those declarations with ``@platform:internal`` in the
-        # description. The worker fills these from the discovered Packer
-        # templates; the wizard must not surface them as user-editable
-        # variables. Same rationale as the ``image_name``/``users``
-        # filter above — these are platform-injected, not user input.
-        desc_match = re.search(r'description\s*=\s*"([^"]*)"', var_block)
-        description = desc_match.group(1) if desc_match else ""
-        if "@platform:internal" in description:
+        # ``users`` is injected by the worker from the deployment's teams;
+        # it is never user input.
+        if var_name == "users":
             continue
         variables.append(_parse_one_variable(
             var_name=var_name,
             var_block=var_block,
             var_block_offset=block_offset,
             file_content=content,
-            file_label="terraform/variables.tf",
-            source="terraform",
+            file_label="tofu/variables.tofu",
         ))
 
     return variables
-
-
-def _parse_packer_variables(file_path: str, template_key: str = "default") -> list[dict[str, Any]]:
-    """Parse Packer `variables.pkr.hcl` file. Per-variable marker errors
-    travel in the ``markerError`` field; see ``_parse_one_variable``.
-
-    ``template_key`` is recorded on each variable so the wizard can
-    group Packer variables per template (and avoid name collisions
-    across templates in multi-image apps). For the single-template
-    layout the caller passes ``"default"``.
-    """
-    with open(file_path) as f:
-        content = f.read()
-
-    variables = []
-    for var_name, var_block, block_offset in _iter_variable_blocks(content):
-        # Filter: image_name rauslassen
-        if var_name == "image_name":
-            continue
-        var_info = _parse_one_variable(
-            var_name=var_name,
-            var_block=var_block,
-            var_block_offset=block_offset,
-            file_content=content,
-            file_label=f"packer/{template_key}/variables.pkr.hcl"
-            if template_key != "default"
-            else "packer/variables.pkr.hcl",
-            source="packer",
-        )
-        var_info["template_key"] = template_key
-        variables.append(var_info)
-
-    return variables
-
-
-# ----------------------------------------------------------------
-# PACKER TEMPLATE DISCOVERY
-# ----------------------------------------------------------------
-# Apps may ship Packer templates in one of two layouts:
-#
-#  1. Legacy single-template layout:
-#         packer/template.pkr.hcl
-#         packer/variables.pkr.hcl
-#     → exactly ONE image, conventionally keyed ``default``. The
-#       worker injects ``image_name`` (a single Terraform variable).
-#
-#  2. Multi-template layout:
-#         packer/<key>/template.pkr.hcl
-#         packer/<key>/variables.pkr.hcl   (optional)
-#     → one image per ``<key>``. The worker injects one
-#       ``image_name_<key>`` Terraform variable per template, each
-#       marked ``@platform:internal`` in its description so the wizard
-#       skips them.
-#
-# Discovery rules:
-#   - No ``packer/`` directory → returns ``[]`` (no Packer phase).
-#   - Legacy file present       → returns ``[_PackerTemplate("default", ...)]``.
-#   - Subdirectories with a
-#     ``template.pkr.hcl``      → returns one entry per subdir, sorted.
-#   - Both legacy AND subdirs   → ``PackerTemplateDiscoveryError`` (hard).
-#   - Subdir without
-#     ``template.pkr.hcl``      → ignored (e.g. ``_common/``, ``scripts/``).
-#   - Subdir with a key that
-#     doesn't match the pattern → ``PackerTemplateDiscoveryError``.
-#
-# Key pattern is intentionally narrow (``[a-z][a-z0-9_-]{0,30}``) so
-# the key is safe to embed in Terraform variable names and image
-# tags without quoting.
-# ----------------------------------------------------------------
-
-@dataclass
-class _PackerTemplate:
-    """One Packer template discovered under ``<repo>/packer``.
-
-    ``variables_path`` may point at a non-existing file — the caller
-    must check ``os.path.isfile`` before reading it. We don't filter
-    here because the file is optional and a missing one is not an
-    error.
-    """
-
-    key: str
-    template_path: str
-    variables_path: str
-
-
-_TEMPLATE_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]{0,30}$")
-
-
-class PackerTemplateDiscoveryError(ValueError):
-    """Raised when the Packer directory has a layout the platform can't
-    reconcile (ambiguous, contradictory, or with an unsafe key).
-
-    Translated to HTTP 422 at the load_variable_definitions boundary
-    so the app author sees the error immediately on the first
-    ``GET /apps/{id}/variables`` instead of at first deploy.
-    """
-
-
-def _discover_packer_templates(repo_path: str) -> list[_PackerTemplate]:
-    """Walk ``<repo_path>/packer`` and return the list of templates the
-    worker will build for this app.
-
-    See the section docstring above for the layout rules. Returns
-    ``[]`` for apps without any Packer at all (Terraform-only).
-    """
-    packer_dir = os.path.join(repo_path, "packer")
-    if not os.path.isdir(packer_dir):
-        return []
-
-    legacy_template = os.path.join(packer_dir, "template.pkr.hcl")
-    has_legacy = os.path.isfile(legacy_template)
-
-    multi_templates: list[_PackerTemplate] = []
-    bad_keys: list[str] = []
-    for entry in sorted(os.listdir(packer_dir)):
-        sub = os.path.join(packer_dir, entry)
-        if not os.path.isdir(sub):
-            continue
-        tmpl = os.path.join(sub, "template.pkr.hcl")
-        if not os.path.isfile(tmpl):
-            # Subdirs without a template (``_common/``, ``scripts/``,
-            # ``http/`` for boot-time HTTP servers, ...) are silently
-            # ignored — they're tooling, not images to build.
-            continue
-        if not _TEMPLATE_KEY_RE.match(entry):
-            bad_keys.append(entry)
-            continue
-        multi_templates.append(_PackerTemplate(
-            key=entry,
-            template_path=tmpl,
-            variables_path=os.path.join(sub, "variables.pkr.hcl"),
-        ))
-
-    if bad_keys:
-        raise PackerTemplateDiscoveryError(
-            f"Packer template subdirectories with invalid keys "
-            f"(must match [a-z][a-z0-9_-]{{0,30}}): {bad_keys}"
-        )
-
-    if has_legacy and multi_templates:
-        raise PackerTemplateDiscoveryError(
-            "App repository has BOTH packer/template.pkr.hcl (legacy "
-            "layout) AND packer/<key>/template.pkr.hcl subdirectories "
-            f"({[t.key for t in multi_templates]}). Choose one layout "
-            "— remove the legacy file or the subdirectories."
-        )
-
-    if has_legacy:
-        return [_PackerTemplate(
-            key="default",
-            template_path=legacy_template,
-            variables_path=os.path.join(packer_dir, "variables.pkr.hcl"),
-        )]
-
-    return multi_templates
 
 
 # ----------------------------------------------------------------
@@ -1223,16 +1120,18 @@ def _discover_packer_templates(repo_path: str) -> list[_PackerTemplate]:
 # ----------------------------------------------------------------
 
 def load_variable_definitions(app, version: str) -> list[dict[str, Any]]:
-    """Clone the app's release-vars and parse all Terraform/Packer
-    variables into the same shape ``GET /apps/{id}/variables`` returns.
+    """Clone the app's release-vars and parse its OpenTofu variables
+    into the same shape ``GET /apps/{id}/variables`` returns.
 
     Reusable from ``POST /deployments`` so the deployment endpoint can
     enforce per-variable contracts (``varScope``, ``fileExtensions``)
     using the App-Autor's declarations as source-of-truth. Cleans up
     the temporary clone on its own — callers don't manage paths.
 
-    Raises ``HTTPException(400)`` if the app has no Git link and
-    bubbles unexpected errors as ``HTTPException(500)``.
+    Raises ``HTTPException(400)`` if the app has no Git link,
+    ``HTTPException(422)`` if the release has no ``tofu/variables.tofu``
+    (i.e. it was not written for the OpenTofu contract), and bubbles
+    unexpected errors as ``HTTPException(500)``.
     """
     if not app.git_link:
         raise HTTPException(
@@ -1246,30 +1145,19 @@ def load_variable_definitions(app, version: str) -> list[dict[str, Any]]:
     repo_path = None
     try:
         repo_path = git_service.clone_release_vars(app.git_link, version, deployment_id)
-        variables: list[dict[str, Any]] = []
-        tf_vars_path = os.path.join(repo_path, "terraform", "variables.tf")
-        if os.path.exists(tf_vars_path):
-            variables.extend(_parse_terraform_variables(tf_vars_path))
-        # Discover all Packer templates (legacy single-file layout OR
-        # per-key subdirectories) and parse each one's variables. The
-        # ``template_key`` is recorded on every Packer variable so the
-        # wizard can group inputs per image. Discovery raises if the
-        # repo has an ambiguous or unsafe layout — surface that as
-        # HTTP 422 so the app author can fix the repo before any
-        # deploy attempt.
-        try:
-            templates = _discover_packer_templates(repo_path)
-        except PackerTemplateDiscoveryError as exc:
+        vars_path = os.path.join(repo_path, TOFU_VARIABLES_FILE)
+        if not os.path.isfile(vars_path):
+            # Surfaced as 422 so the app author sees it on the first
+            # ``GET /apps/{id}/variables`` instead of at deploy time.
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=str(exc),
+                detail=(
+                    f"Release '{version}' enthält kein tofu/variables.tofu. "
+                    "Apps müssen auf OpenTofu umgestellt sein: Ordner tofu/ "
+                    "mit *.tofu-Dateien, kein packer/ und kein terraform/."
+                ),
             )
-        for tmpl in templates:
-            if os.path.isfile(tmpl.variables_path):
-                variables.extend(
-                    _parse_packer_variables(tmpl.variables_path, template_key=tmpl.key)
-                )
-        return variables
+        return _parse_tofu_variables(vars_path)
     except HTTPException:
         raise
     except Exception:

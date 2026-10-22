@@ -44,7 +44,7 @@ class TaskType(str, enum.Enum):
     PAUSE = "pause"
     RESUME = "resume"
     # Single-resource redeploy of ONE Compute-Instance via
-    # ``terraform apply -replace=<addr> -target=<addr>``, without
+    # ``tofu apply -replace=<addr> -target=<addr>``, without
     # touching the other team VMs of the same deployment.
     REDEPLOY = "redeploy"
 
@@ -241,8 +241,8 @@ class Task(Base):
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)
     logs = Column(Text, nullable=True)  # JSON or text
-    tf_state = Column(Text, nullable=True)  # Terraform state as JSON/text
-    outputs = Column(Text, nullable=True)  # Terraform outputs as JSON/text
+    tf_state = Column(Text, nullable=True)  # OpenTofu state as JSON/text
+    outputs = Column(Text, nullable=True)  # OpenTofu outputs as JSON/text
     # Live-progress columns, updated by the celery event listener on
     # each ``task-progress`` event. Advisory only — the SSE stream is
     # canonical; these let a page reload show the last known phase/pct.
@@ -517,6 +517,13 @@ class LtiContext(Base):
     context_id = Column(String, nullable=False)
     title = Column(String, nullable=True)
     label = Column(String, nullable=True)
+    # Where the platform serves this course's member list (NRPS). The
+    # URL arrives in the launch and is stored because the import runs
+    # later, on a request of its own, when no launch is in hand. Null
+    # when the platform does not offer the service — the tool then has
+    # no way to read the roster and the import says so instead of
+    # guessing.
+    memberships_url = Column(String, nullable=True)
     courseId = Column(
         UUID(as_uuid=True),
         ForeignKey("courses.courseId", ondelete="SET NULL"),
@@ -532,3 +539,32 @@ class LtiContext(Base):
 
     # Relationships
     course = relationship("Course", back_populates="lti_contexts")
+
+
+# ----------------------------------------------------------------
+# UI SETTINGS MODEL
+# ----------------------------------------------------------------
+class UiSettings(Base):
+    """The instance's look, as an admin set it: accent colour and logos.
+
+    A single row (``id = 1``). Every column is nullable, and ``NULL``
+    means "the frontend's built-in default" — so a fresh installation
+    needs no row at all, and resetting a value is setting it back to
+    ``NULL`` rather than copying the default into the database.
+    """
+
+    __tablename__ = "ui_settings"
+
+    id = Column(Integer, primary_key=True, default=1)
+    # ``#RRGGBB``; the frontend derives hover, text and dark-theme shades from it.
+    accent_color = Column(String(7), nullable=True)
+    # Wordmark on light backgrounds, wordmark on dark backgrounds, and the
+    # small emblem (collapsed sidebar, favicon). Bytes plus their mime, as
+    # with ``App.image``.
+    logo_light = Column(LargeBinary, nullable=True)
+    logo_light_mime = Column(String(64), nullable=True)
+    logo_dark = Column(LargeBinary, nullable=True)
+    logo_dark_mime = Column(String(64), nullable=True)
+    logo_icon = Column(LargeBinary, nullable=True)
+    logo_icon_mime = Column(String(64), nullable=True)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)

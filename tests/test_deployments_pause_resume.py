@@ -39,6 +39,7 @@ def _smtp_enabled_default(monkeypatch):
     monkeypatch.setattr(settings, "SMTP_ENABLED", True, raising=False)
     monkeypatch.setattr(settings, "SMTP_USER", "test@example.com", raising=False)
     monkeypatch.setattr(settings, "SMTP_PASSWORD", "test-password", raising=False)
+    monkeypatch.setattr(settings, "SMTP_HOST", "mail.example.org", raising=False)
 
 
 def _make_deployment_with_creds(
@@ -72,7 +73,7 @@ def _make_deployment_with_creds(
         appId=app.appId,
         userId=user.userId,
         releaseTag="v1.0.0",
-        userInputVar=json.dumps({"terraform": {}, "packer": {}}),
+        userInputVar=json.dumps({"tofu": {}}),
     )
     db.add(deployment)
     db.flush()

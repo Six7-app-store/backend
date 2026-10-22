@@ -44,7 +44,7 @@ from app.services.deployment_status import (
     build_resource_views,
 )
 from app.services.hcl_variable_parser import load_variable_definitions
-from app.services.tf_state_parser import parse_tf_state
+from app.services.tofu_state_parser import parse_tf_state
 from app.utils.auth import get_current_user
 from app.utils.capabilities import (
     can_view_deployment_owner,
@@ -262,7 +262,7 @@ def get_deployment(
     - User and App relations
     - Teams with members
     - Latest task status
-    - Terraform outputs
+    - OpenTofu outputs
     - Optionally: full logs (use include_logs=true)
     """
     deployment = crud_deployments.get_deployment_with_details(db, deployment_id)
@@ -398,15 +398,15 @@ def _attach_files_to_user_input(
     """Validate and merge wizard-uploaded files into ``userInputVar``.
 
     The wizard ships files in a parallel ``files`` field instead of
-    nesting them straight into ``userInputVar.terraform`` so the
+    nesting them straight into ``userInputVar.tofu`` so the
     request payload's shape is obvious to a reader and so we can
     apply size / encoding validation in one place. Result is a fresh
-    dict with the files folded into ``terraform[var_name]`` — the
+    dict with the files folded into ``tofu[var_name]`` — the
     worker doesn't need to know they originally came from a separate
     field.
 
     Validation:
-      * each top-level key in ``files`` becomes one terraform variable
+      * each top-level key in ``files`` becomes one OpenTofu variable
       * each inner-map entry is one ``DeploymentFileUpload`` record
       * ``content_b64`` decodes cleanly (RFC 4648, padding optional)
       * decoded size matches the declared ``size`` (within rounding —
@@ -424,8 +424,7 @@ def _attach_files_to_user_input(
     we get here, so we only catch what gets past it.
     """
     base = dict(user_input_var or {})
-    base.setdefault("terraform", {})
-    base.setdefault("packer", {})
+    base.setdefault("tofu", {})
 
     if not files:
         return base
@@ -445,10 +444,10 @@ def _attach_files_to_user_input(
                 scoped_file_vars.add(vdef["name"])
 
     total_bytes = 0
-    terraform_block = dict(base.get("terraform") or {})
+    tofu_block = dict(base.get("tofu") or {})
 
     for var_name, slot_map in files.items():
-        if var_name in terraform_block:
+        if var_name in tofu_block:
             # Wizard already routed something into this variable — a
             # collision means the frontend filled both the variables
             # picker AND the file uploader for the same name. That's an
@@ -552,14 +551,14 @@ def _attach_files_to_user_input(
         # outer key is the team/user slot, inner key is the upload slot.
         # scope=all: HCL type is map(object({...})) — flat map.
         if var_name in scoped_file_vars:
-            terraform_block[var_name] = {
+            tofu_block[var_name] = {
                 slot_key: {"uploaded": file_obj}
                 for slot_key, file_obj in encoded_slots.items()
             }
         else:
-            terraform_block[var_name] = encoded_slots
+            tofu_block[var_name] = encoded_slots
 
-    base["terraform"] = terraform_block
+    base["tofu"] = tofu_block
     return base
 
 
@@ -574,7 +573,7 @@ def _validate_scoped_user_input(
     Reasoning: the wizard packs scoped variables as a Map
     (``{slot_key: value, ...}``) and ships them via ``userInputVar``.
     A hand-crafted POST could ship arbitrary keys; we want unknown
-    Scope-Targets to fail fast and loud before they hit Terraform,
+    Scope-Targets to fail fast and loud before they hit OpenTofu,
     where the error would be a confusing "module: invalid for_each
     key" deep in the worker log.
 
@@ -635,7 +634,7 @@ def _validate_scoped_user_input(
         """Treat None, empty string, empty list, and empty dict as
         "slot not filled". The wizard would otherwise let a required
         team/user-scoped var slip through with one team left blank,
-        which Terraform would catch with a much less actionable
+        which OpenTofu would catch with a much less actionable
         ``Inappropriate value for attribute`` deep in the worker log.
         """
         if val is None:
@@ -644,116 +643,204 @@ def _validate_scoped_user_input(
             return True
         return isinstance(val, (list, dict)) and len(val) == 0
 
-    for source_key in ("terraform", "packer"):
-        block = user_input_var.get(source_key)
-        if not isinstance(block, dict):
+    block = user_input_var.get("tofu")
+    if not isinstance(block, dict):
+        return
+    for vdef in variable_definitions:
+        scope = vdef.get("varScope")
+        if scope not in ("team", "user"):
             continue
-        for vdef in variable_definitions:
-            if vdef.get("source") != source_key:
-                continue
-            scope = vdef.get("varScope")
-            if scope not in ("team", "user"):
-                continue
-            var_name = vdef["name"]
-            value = block.get(var_name)
-            is_file = vdef.get("osType") == "file"
-            required = bool(vdef.get("required"))
-            if value is None:
-                # File-scope vars MUST be present — the wizard always
-                # ships at least an empty map for them, so a None here
-                # is a hand-crafted-POST shape. For non-file required
-                # scoped vars, raise on the slot-completeness check
-                # below by treating the absent value as an empty map.
-                if required:
-                    value = {}
-                else:
-                    continue  # variable left at HCL default — allowed
-            if not isinstance(value, dict):
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail={
-                        "reason": "scoped_var_not_map",
-                        "variable": var_name,
-                        "scope": scope,
-                    },
-                )
-            for slot_key in value:
-                if scope == "team":
-                    if slot_key not in team_names:
-                        raise HTTPException(
-                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            detail={
-                                "reason": "unknown_scope_target",
-                                "variable": var_name,
-                                "scope": scope,
-                                "slot": slot_key,
-                                "allowed": sorted(team_names),
-                            },
-                        )
-                else:  # user scope
-                    # Longest-prefix-match against known team names so
-                    # a team named ``Team-A`` parses to prefix
-                    # ``Team-A`` and rest ``Username`` instead of
-                    # prefix ``Team`` (which wouldn't be a known team).
-                    prefix = _user_slot_team_prefix(slot_key)
-                    if prefix is None or slot_key == prefix:
-                        raise HTTPException(
-                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            detail={
-                                "reason": "unknown_scope_target",
-                                "variable": var_name,
-                                "scope": scope,
-                                "slot": slot_key,
-                                "hint": "expected ``TeamName-Username``",
-                            },
-                        )
-
-            # Required slot-completeness check: for required team /
-            # user scoped variables every expected slot key must carry
-            # a non-empty value. Without this an empty map (or one
-            # team left blank) would silently pass here and only fail
-            # downstream with an opaque Terraform error.
-            #
-            # File vars are skipped from the completeness sweep — the
-            # per-file size/decode validation in
-            # :func:`_attach_files_to_user_input` raises a more specific
-            # error (file_var_empty / file_b64_invalid) for them. We
-            # only checked slot identity above; the bytes themselves
-            # are validated at that layer.
-            if required and not is_file:
-                expected_slots: set[str] = set()
-                if scope == "team":
-                    expected_slots = set(team_names)
-                # For ``user`` scope we don't have the per-team member
-                # roster here (would need a DB round-trip we already
-                # avoid above), so we only enforce that each slot the
-                # caller did ship carries a non-empty value. The
-                # wizard's frontend check is the primary guard; this
-                # is defense-in-depth against hand-crafted POSTs that
-                # ship one half-filled team. A POST that omits a team
-                # entirely for a required user-scope var is caught by
-                # the team-scope branch via team_names because the
-                # wizard always emits at least one slot per team.
-
-                missing: list[str] = []
-                for slot in expected_slots:
-                    if _is_empty_slot_value(value.get(slot)):
-                        missing.append(slot)
-                # Also flag empty values among slots the caller did
-                # provide — covers user-scope and any partial-fill case.
-                for slot, val in value.items():
-                    if _is_empty_slot_value(val) and slot not in missing:
-                        missing.append(slot)
-                if missing:
+        var_name = vdef["name"]
+        value = block.get(var_name)
+        is_file = vdef.get("osType") == "file"
+        required = bool(vdef.get("required"))
+        if value is None:
+            # File-scope vars MUST be present — the wizard always
+            # ships at least an empty map for them, so a None here
+            # is a hand-crafted-POST shape. For non-file required
+            # scoped vars, raise on the slot-completeness check
+            # below by treating the absent value as an empty map.
+            if required:
+                value = {}
+            else:
+                continue  # variable left at HCL default — allowed
+        if not isinstance(value, dict):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "reason": "scoped_var_not_map",
+                    "variable": var_name,
+                    "scope": scope,
+                },
+            )
+        for slot_key in value:
+            if scope == "team":
+                if slot_key not in team_names:
                     raise HTTPException(
                         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                         detail={
-                            "reason": "required_slot_empty",
+                            "reason": "unknown_scope_target",
                             "variable": var_name,
                             "scope": scope,
-                            "missing_slots": sorted(missing),
+                            "slot": slot_key,
+                            "allowed": sorted(team_names),
                         },
                     )
+            else:  # user scope
+                # Longest-prefix-match against known team names so
+                # a team named ``Team-A`` parses to prefix
+                # ``Team-A`` and rest ``Username`` instead of
+                # prefix ``Team`` (which wouldn't be a known team).
+                prefix = _user_slot_team_prefix(slot_key)
+                if prefix is None or slot_key == prefix:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail={
+                            "reason": "unknown_scope_target",
+                            "variable": var_name,
+                            "scope": scope,
+                            "slot": slot_key,
+                            "hint": "expected ``TeamName-Username``",
+                        },
+                    )
+
+        # Required slot-completeness check: for required team /
+        # user scoped variables every expected slot key must carry
+        # a non-empty value. Without this an empty map (or one
+        # team left blank) would silently pass here and only fail
+        # downstream with an opaque OpenTofu error.
+        #
+        # File vars are skipped from the completeness sweep — the
+        # per-file size/decode validation in
+        # :func:`_attach_files_to_user_input` raises a more specific
+        # error (file_var_empty / file_b64_invalid) for them. We
+        # only checked slot identity above; the bytes themselves
+        # are validated at that layer.
+        if required and not is_file:
+            expected_slots: set[str] = set()
+            if scope == "team":
+                expected_slots = set(team_names)
+            # For ``user`` scope we don't have the per-team member
+            # roster here (would need a DB round-trip we already
+            # avoid above), so we only enforce that each slot the
+            # caller did ship carries a non-empty value. The
+            # wizard's frontend check is the primary guard; this
+            # is defense-in-depth against hand-crafted POSTs that
+            # ship one half-filled team. A POST that omits a team
+            # entirely for a required user-scope var is caught by
+            # the team-scope branch via team_names because the
+            # wizard always emits at least one slot per team.
+
+            missing: list[str] = []
+            for slot in expected_slots:
+                if _is_empty_slot_value(value.get(slot)):
+                    missing.append(slot)
+            # Also flag empty values among slots the caller did
+            # provide — covers user-scope and any partial-fill case.
+            for slot, val in value.items():
+                if _is_empty_slot_value(val) and slot not in missing:
+                    missing.append(slot)
+            if missing:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={
+                        "reason": "required_slot_empty",
+                        "variable": var_name,
+                        "scope": scope,
+                        "missing_slots": sorted(missing),
+                    },
+                )
+
+
+def _slot_username(user: User) -> str:
+    """The name a person's slot is keyed by — mirror of the wizard's
+    ``useWizardTeams``: username, else the email's local part, else the
+    first name, else the start of the id."""
+    return (
+        user.username
+        or (user.email or "").split("@")[0]
+        or user.firstName
+        or str(user.userId)[:8]
+    )
+
+
+def _expected_slots(scope: str, teams_payload: list, db: Session) -> list[str]:
+    """Every slot a scoped variable needs for this roster: one per team,
+    or ``TeamName-Username`` per member."""
+    slots: list[str] = []
+    for team in teams_payload or []:
+        if scope == "team":
+            slots.append(team.name)
+            continue
+        for user_id in team.userIds:
+            user = crud_users.get_user(db, user_id)
+            if user:
+                slots.append(f"{team.name}-{_slot_username(user)}")
+    return slots
+
+
+def _is_unfilled(value) -> bool:
+    """``None``, blank text, an empty list or map — or a file without bytes."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip() == ""
+    if isinstance(value, (list, dict)) and len(value) == 0:
+        return True
+    return isinstance(value, dict) and "content_b64" in value and not value.get("content_b64")
+
+
+def _validate_required_inputs(
+    user_input_var: dict | None,
+    variable_definitions: list[dict],
+    teams_payload: list,
+    db: Session,
+) -> None:
+    """Reject the create when a required variable or file is missing.
+
+    A variable without a default is required. Unscoped ones need a value;
+    team/user scoped ones and file variables a value in every slot of the
+    roster (``all`` for a file for everybody). Run after the files are
+    folded into ``userInputVar.tofu`` and after the slot identities were
+    checked, so this only answers "is anything left empty?".
+
+    Without it a missing task file only surfaces in the worker, minutes
+    later, as an OpenTofu error. Raises 422 with
+    ``reason="required_missing"`` and every gap as ``{variable, slot?}``.
+    """
+    block = (user_input_var or {}).get("tofu")
+    block = block if isinstance(block, dict) else {}
+    missing: list[dict] = []
+    for vdef in variable_definitions:
+        if not vdef.get("required"):
+            continue
+        name = vdef["name"]
+        is_file = vdef.get("osType") == "file"
+        scope = (
+            (vdef.get("osScope") or vdef.get("varScope")) if is_file else vdef.get("varScope")
+        ) or "all"
+        value = block.get(name)
+        if scope == "all":
+            filled = (
+                isinstance(value, dict) and not _is_unfilled(value.get("all"))
+                if is_file
+                else not _is_unfilled(value)
+            )
+            if not filled:
+                missing.append({"variable": name})
+            continue
+        slot_map = value if isinstance(value, dict) else {}
+        slots = _expected_slots(scope, teams_payload, db)
+        if not slots and not is_file:
+            missing.append({"variable": name})
+        missing.extend(
+            {"variable": name, "slot": slot} for slot in slots if _is_unfilled(slot_map.get(slot))
+        )
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"reason": "required_missing", "missing": missing},
+        )
 
 
 def _strip_file_vars_from_user_input(user_input_var: dict | None) -> dict | None:
@@ -773,20 +860,20 @@ def _strip_file_vars_from_user_input(user_input_var: dict | None) -> dict | None
     if not isinstance(user_input_var, dict):
         return user_input_var
 
-    out = {k: v for k, v in user_input_var.items() if k != "terraform"}
-    tf_block = user_input_var.get("terraform")
-    if not isinstance(tf_block, dict):
-        if "terraform" in user_input_var:
-            out["terraform"] = tf_block
+    out = {k: v for k, v in user_input_var.items() if k != "tofu"}
+    tofu_block = user_input_var.get("tofu")
+    if not isinstance(tofu_block, dict):
+        if "tofu" in user_input_var:
+            out["tofu"] = tofu_block
         return out
 
-    stripped_tf: dict = {}
-    for var_name, value in tf_block.items():
+    stripped: dict = {}
+    for var_name, value in tofu_block.items():
         if _looks_like_file_var(value):
-            stripped_tf[var_name] = _file_var_metadata_only(value)
+            stripped[var_name] = _file_var_metadata_only(value)
         else:
-            stripped_tf[var_name] = value
-    out["terraform"] = stripped_tf
+            stripped[var_name] = value
+    out["tofu"] = stripped
     return out
 
 
@@ -813,7 +900,7 @@ def _looks_like_file_var(value) -> bool:
     triplet. Used at response-shaping time to identify file-typed
     variables without consulting the app's variable schema, AND at
     lifecycle-dispatch time (destroy/pause/resume/redeploy) to drop
-    file vars from the worker's var-set so Terraform's schema
+    file vars from the worker's var-set so OpenTofu's schema
     validation doesn't trip on a payload it doesn't need.
 
     Shape examples it matches (and only these):
@@ -901,29 +988,36 @@ def create_deployment(
     # endpoint when visibility is denied.
     ensure_view_app(current_user, target_app, db=db)
 
+    # The version is chosen, never guessed: there used to be a "main"
+    # fallback here, and the wizard sent "latest" — neither is a release
+    # anyone approved.
+    if not deployment.releaseTag:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"reason": "version_required"},
+        )
     # Seeing the app only means SOME version is approved. The version being
     # deployed has to be one, unless the caller owns the app or is an admin.
     ensure_deploy_version(current_user, target_app, deployment.releaseTag, db)
 
     # Load the app author's variable declarations so we can enforce
-    # per-variable contracts (``varScope``, ``fileExtensions``) below.
-    # We only do this when the request actually carries variables /
-    # files — for a no-input deploy the round-trip into Git would be
-    # waste. Same parser as ``GET /apps/{id}/variables`` so client and
-    # server agree on which variable is scoped/file/free-text.
+    # per-variable contracts (``varScope``, ``fileExtensions``, required
+    # inputs) below. Same parser as ``GET /apps/{id}/variables`` so
+    # client and server agree on which variable is scoped/file/required.
+    # Loaded for every deploy, also one without inputs: that is exactly
+    # the request that forgot a required file.
     variable_definitions: list[dict] = []
-    if deployment.userInputVar or deployment.files:
-        release_tag = deployment.releaseTag or "main"
+    if target_app.git_link:
         try:
-            variable_definitions = load_variable_definitions(target_app, release_tag)
+            variable_definitions = load_variable_definitions(target_app, deployment.releaseTag)
         except HTTPException as exc:
             if exc.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY:
                 raise
-            # 400 (no git_link) or 500 (git unreachable) — skip validation,
-            # proceed without variable definitions.
+            # 500 (git unreachable) — skip validation, proceed without
+            # variable definitions; the worker still fails loudly.
 
     # Fold the wizard's parallel ``files`` upload into
-    # ``userInputVar.terraform`` before the row gets persisted, so the
+    # ``userInputVar.tofu`` before the row gets persisted, so the
     # rest of this handler — and the worker downstream — sees one
     # uniform dict. The helper validates base64 / size / per-file and
     # per-deployment caps; any failure short-circuits with a 4xx and
@@ -943,6 +1037,12 @@ def create_deployment(
             deployment.userInputVar,
             variable_definitions,
             deployment.teams or [],
+        )
+        _validate_required_inputs(
+            deployment.userInputVar,
+            variable_definitions,
+            deployment.teams or [],
+            db,
         )
 
     db_deployment = crud_deployments.create_deployment(
@@ -978,7 +1078,7 @@ def create_deployment(
     except Exception:
         user_vars = {}
 
-    # Format teams for Terraform (team_name: [user_emails])
+    # Format teams for OpenTofu (team_name: [user_emails])
     teams_dict = {}
     if deployment.teams:
         for team in deployment.teams:
@@ -1052,7 +1152,7 @@ def create_deployment(
 # the deployment's status:
 #
 #   * ``success`` / ``failed`` / ``paused`` → dispatch a Destroy task
-#     (terraform destroy + auto-soft-delete on success). ``paused`` is
+#     (tofu destroy + auto-soft-delete on success). ``paused`` is
 #     in the destroy set because SHUTOFF instances + volumes/networks
 #     are still OpenStack resources that need to be reclaimed.
 #     Returns 202 + task_id; the frontend keeps the live stream open
@@ -1264,7 +1364,7 @@ def _dispatch_lifecycle_task(
     # (destroy, pause, resume), strip any ``@openstack:file:*`` payloads
     # from the user-vars BEFORE they reach the worker. Files are only
     # consumed at apply-time by cloud-init's write_files; everything
-    # else just hands the same var-set to Terraform which then
+    # else just hands the same var-set to OpenTofu which then
     # validates the entire variable surface against the HCL schema.
     # A row whose ``content_b64`` was stripped by a response-side
     # ``_strip_file_vars_from_user_input`` pass (e.g. after a manual
@@ -1273,9 +1373,9 @@ def _dispatch_lifecycle_task(
     # ``element "all": attributes "content_b64", "content_type",
     # "name", and "size" are required`` because the surviving slot
     # violates the variable's object type. Dropping the var
-    # altogether lets Terraform fall back on the HCL default.
+    # altogether lets OpenTofu fall back on the HCL default.
     #
-    # REDEPLOY is the special case: ``terraform apply -replace`` destroys
+    # REDEPLOY is the special case: ``tofu apply -replace`` destroys
     # and recreates the VM, so cloud-init runs fresh and MUST receive the
     # original ``write_files`` payload — otherwise the replaced VM ends
     # up empty even though the user/group/password config is preserved.
@@ -1286,13 +1386,13 @@ def _dispatch_lifecycle_task(
     # DEPLOY/UPDATE legitimately need the file bytes too — they don't
     # enter the worker via this helper.
     if task_type in (TaskType.DESTROY, TaskType.PAUSE, TaskType.RESUME):
-        terraform_block = user_vars.get("terraform")
-        if isinstance(terraform_block, dict):
+        tofu_block = user_vars.get("tofu")
+        if isinstance(tofu_block, dict):
             user_vars = {
                 **user_vars,
-                "terraform": {
+                "tofu": {
                     k: v
-                    for k, v in terraform_block.items()
+                    for k, v in tofu_block.items()
                     if not _looks_like_file_var(v)
                 },
             }
@@ -1354,7 +1454,7 @@ def _dispatch_lifecycle_task(
 #       Frontend loads this lazily when the user opens a card's drawer.
 #
 #   * POST /{deployment_id}/resources/{address}/redeploy
-#       Per-VM redeploy — issues ``terraform apply -replace=<addr>
+#       Per-VM redeploy — issues ``tofu apply -replace=<addr>
 #       -target=<addr>`` in a dedicated Celery task. Strictly
 #       address-whitelisted against the cached TF state and the
 #       compute-instance category, so a hand-crafted POST can't smuggle
@@ -1365,8 +1465,8 @@ def _dispatch_lifecycle_task(
 # able to access through the deployment detail page.
 
 
-# We accept the same Terraform address vocabulary the user would type
-# on ``terraform apply -target=``: ``type.name`` with optional
+# We accept the same OpenTofu address vocabulary the user would type
+# on ``tofu apply -target=``: ``type.name`` with optional
 # ``[<int>]`` or ``["<string>"]`` suffix. Multiple address segments
 # (modules, nested resources) aren't supported by the current apps,
 # so we keep the regex strict to make smuggling impossible. The
@@ -1387,7 +1487,7 @@ _TF_ADDRESS_RE = re.compile(
 
 def _latest_tf_state_for(deployment_id: UUID, db: Session) -> str | None:
     """Return the JSON blob of the most recent task that captured a
-    Terraform state for this deployment, or None when no apply ever
+    OpenTofu state for this deployment, or None when no apply ever
     succeeded yet.
 
     Note: we deliberately do NOT filter by ``task.type`` — the worker
@@ -1509,7 +1609,7 @@ def redeploy_deployment_resource(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Replace one compute instance via ``terraform apply -replace=…``.
+    """Replace one compute instance via ``tofu apply -replace=…``.
 
     Address-whitelisted: we re-parse the cached TF state and only
     accept addresses that resolve to a compute instance. Anything else
@@ -1588,7 +1688,7 @@ def _view_asdict(view) -> dict:
 
 #
 # Halts the OpenStack compute instances of a deployment without
-# tearing them down. The worker task pulls the terraform state, lists
+# tearing them down. The worker task pulls the tofu state, lists
 # every ``openstack_compute_instance_v2`` resource, and runs
 # ``openstack server stop`` against each. Volumes and networks stay,
 # so RESUME restores the same instances byte-for-byte.
@@ -1751,8 +1851,8 @@ def download_deployment_file(
     except json.JSONDecodeError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No files")
 
-    tf_block = user_input.get("terraform") if isinstance(user_input, dict) else None
-    var_value = (tf_block or {}).get(var_name)
+    tofu_block = user_input.get("tofu") if isinstance(user_input, dict) else None
+    var_value = (tofu_block or {}).get(var_name)
     if not _looks_like_file_var(var_value):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1800,7 +1900,7 @@ def get_my_access(
 ):
     """Return the calling member's OWN access credentials for a deployment.
 
-    The full terraform ``outputs`` are owner-view-only (they carry every
+    The full tofu ``outputs`` are owner-view-only (they carry every
     teammate's credentials in one object). This endpoint is the member
     counterpart: a team member — typically a student — retrieves only
     THEIR OWN account, extracted server-side from the latest successful
@@ -1856,14 +1956,14 @@ def resend_access_credentials(
 
     Reuses the original notify pipeline — same template, same
     credential extraction from the latest successful DEPLOY task's
-    ``terraform_outputs``. Useful when the user lost their first mail
+    ``tofu_outputs``. Useful when the user lost their first mail
     or the deploy ran before the user's email got fixed.
 
     Access control: caller must have access to the deployment (owner
     or teacher/admin). The endpoint is intentionally idempotent —
     each call sends one mail to the targeted user. There's no rate
-    limit at the API level; SMTP and Gmail's per-account quota are
-    the natural backstops.
+    limit at the API level; the mail server's own sending limits are
+    the only backstop.
 
     Mapping ResendError to HTTP:
       * ``deployment_not_found`` → 404
@@ -1918,7 +2018,7 @@ def resend_access_credentials(
 
     # Refuse while another lifecycle action is in flight. Resending
     # the access mail relies on the latest successful DEPLOY task's
-    # ``terraform_outputs``; during pending/running/destroying/
+    # ``tofu_outputs``; during pending/running/destroying/
     # pausing/resuming the deployment is in transition and the
     # credentials might no longer be reachable on the VM (paused →
     # SHUTOFF, destroying → tearing down). Returning 409 here keeps
@@ -2010,8 +2110,7 @@ async def stream_deployment_events(
     if not deployment:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment not found")
     # Inspect-only view via capabilities. The live stream surfaces
-    # task-log lines (raw worker stdout incl. terraform output, packer
-    # build chatter, etc.); course-teachers of the deployment-owner's
+    # task-log lines (raw worker stdout incl. tofu output, etc.); course-teachers of the deployment-owner's
     # course are in the inspect set, owners and admins keep their access,
     # and plain members still see metadata only.
     ensure_view_deployment_owner(current_user, deployment, db)

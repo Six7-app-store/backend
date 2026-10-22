@@ -5,8 +5,9 @@ Handles token validation and user management with Keycloak.
 import logging
 import threading
 
+import jwt
 from fastapi import HTTPException, status
-from jose import JWTError, jwt
+from jwt import InvalidTokenError
 from keycloak import KeycloakAdmin, KeycloakAuthenticationError, KeycloakOpenID
 from sqlalchemy.orm import Session
 
@@ -107,7 +108,7 @@ def verify_keycloak_token_offline(token: str) -> dict:
             algorithms=["RS256"],
             options={"verify_signature": True, "verify_aud": False, "verify_exp": True},
         )
-    except JWTError:
+    except InvalidTokenError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token",
@@ -230,7 +231,7 @@ def sync_user_from_keycloak(db: Session, keycloak_user_data: dict) -> User:
         user.email = email
         updated = True
     # Username is the login identifier shown in the UI and in
-    # Terraform-issued credentials; keep it in sync too.
+    # OpenTofu-issued credentials; keep it in sync too.
     if username and user.username != username:
         user.username = username
         updated = True

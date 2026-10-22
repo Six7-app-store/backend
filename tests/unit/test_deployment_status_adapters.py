@@ -27,7 +27,7 @@ from app.services.deployment_status import (
     _translate_power_state,
     _view_from_cached,
 )
-from app.services.tf_state_parser import TfResource
+from app.services.tofu_state_parser import TfResource
 
 
 # ----------------------------------------------------------------
