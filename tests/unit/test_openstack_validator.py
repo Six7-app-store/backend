@@ -145,3 +145,94 @@ def test_validate_rejects_missing_required_fields():
 
     msg = str(exc.value)
     assert "user_domain_name" in msg or "project" in msg
+
+
+def test_validate_missing_project_maps_404_to_its_own_message():
+    """404 is not a credential problem - the identifier is right, the target is not."""
+    payload = _password_payload(project_name="does-not-exist")
+    http_err = os_exc.HttpException(message="Not Found")
+    http_err.status_code = 404
+
+    conn = MagicMock()
+    conn.authorize.side_effect = http_err
+
+    with patch.object(openstack_validator.openstack, "connect", return_value=conn):
+        ok, err = openstack_validator.validate(payload)
+
+    assert ok is False
+    assert err == "Project or domain not found"
+
+
+def test_validate_unmapped_http_status_names_the_code():
+    """Any other HTTP status keeps the code, so a 5xx is distinguishable from a 4xx."""
+    payload = _password_payload()
+    http_err = os_exc.HttpException(message="Internal Server Error")
+    http_err.status_code = 500
+
+    conn = MagicMock()
+    conn.authorize.side_effect = http_err
+
+    with patch.object(openstack_validator.openstack, "connect", return_value=conn):
+        ok, err = openstack_validator.validate(payload)
+
+    assert ok is False
+    assert err == "OpenStack rejected request (HTTP 500)"
+
+
+def test_validate_http_exception_without_status_does_not_crash():
+    """``status_code`` is not guaranteed; the message then falls back to ``?``."""
+    payload = _password_payload()
+
+    conn = MagicMock()
+    conn.authorize.side_effect = os_exc.HttpException(message="no status here")
+
+    with patch.object(openstack_validator.openstack, "connect", return_value=conn):
+        ok, err = openstack_validator.validate(payload)
+
+    assert ok is False
+    assert err == "OpenStack rejected request (HTTP ?)"
+
+
+def test_validate_sdk_error_reports_only_the_exception_type():
+    """An SDK error may carry the request body - only the type name may surface."""
+    payload = _password_payload(secret="s3cret-do-not-leak")
+
+    conn = MagicMock()
+    conn.authorize.side_effect = os_exc.SDKException("body with s3cret-do-not-leak in it")
+
+    with patch.object(openstack_validator.openstack, "connect", return_value=conn):
+        ok, err = openstack_validator.validate(payload)
+
+    assert ok is False
+    assert err == "OpenStack SDK error: SDKException"
+    assert "s3cret-do-not-leak" not in (err or "")
+
+
+def test_validate_unexpected_error_reports_only_the_exception_type():
+    """Same reasoning for anything unforeseen: type only, never the message."""
+    payload = _password_payload(secret="s3cret-do-not-leak")
+
+    with patch.object(
+        openstack_validator.openstack,
+        "connect",
+        side_effect=RuntimeError("stack trace mentioning s3cret-do-not-leak"),
+    ):
+        ok, err = openstack_validator.validate(payload)
+
+    assert ok is False
+    assert err == "Unexpected error: RuntimeError"
+    assert "s3cret-do-not-leak" not in (err or "")
+
+
+def test_validate_restores_the_previous_socket_timeout():
+    """The 15 s boundary is process-wide - it must not leak past the call."""
+    payload = _password_payload()
+    socket.setdefaulttimeout(3.5)
+    try:
+        conn = MagicMock()
+        with patch.object(openstack_validator.openstack, "connect", return_value=conn):
+            openstack_validator.validate(payload)
+
+        assert socket.getdefaulttimeout() == 3.5
+    finally:
+        socket.setdefaulttimeout(None)

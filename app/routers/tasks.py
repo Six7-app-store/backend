@@ -8,7 +8,7 @@ can render progress.
 Every endpoint enforces ``ensure_view_deployment_owner`` from
 ``app.utils.capabilities`` — the same gate ``/deployments`` uses for logs and
 outputs. Only the deployment owner, admins and course-teachers of the owner's
-course can read task data (logs, Terraform state and outputs: IPs, passwords,
+course can read task data (logs, OpenTofu state and outputs: IPs, passwords,
 worker stack traces). Members get a 403 even though they can read deployment
 metadata, and so does a teacher without a course link to the owner.
 """

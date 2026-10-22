@@ -68,7 +68,7 @@ def patched_celery():
 
 
 @pytest.mark.integration
-def test_post_deployment_persists_files_under_terraform(
+def test_post_deployment_persists_files_under_tofu(
     client, db, mock_user, patched_celery
 ):
     _ensure_user_credentials(db, mock_user)
@@ -79,7 +79,7 @@ def test_post_deployment_persists_files_under_terraform(
         "name": "with-files",
         "appId": str(app.appId),
         "releaseTag": "v1",
-        "userInputVar": {"terraform": {"some_other": "x"}, "packer": {}},
+        "userInputVar": {"tofu": {"some_other": "x"}},
         "files": {
             "task_pdf": {
                 "all": {
@@ -98,7 +98,7 @@ def test_post_deployment_persists_files_under_terraform(
     body = response.json()
     # The list/detail responses strip file bytes — but metadata
     # survives so the UI can render "uploaded: aufgabe.pdf".
-    file_var = body["userInputVar"]["terraform"]["task_pdf"]
+    file_var = body["userInputVar"]["tofu"]["task_pdf"]
     upload = file_var["all"]
     assert upload["name"] == "aufgabe.pdf"
     assert upload["size"] == len(pdf)
@@ -111,15 +111,15 @@ def test_post_deployment_persists_files_under_terraform(
         Deployment.deploymentId == uuid.UUID(body["deploymentId"])
     ).one()
     persisted = json.loads(deployment.userInputVar)
-    assert persisted["terraform"]["task_pdf"]["all"]["content_b64"] == _b64(pdf)
-    # Existing terraform vars were preserved through the merge.
-    assert persisted["terraform"]["some_other"] == "x"
+    assert persisted["tofu"]["task_pdf"]["all"]["content_b64"] == _b64(pdf)
+    # Existing tofu vars were preserved through the merge.
+    assert persisted["tofu"]["some_other"] == "x"
 
     # Celery args carry the same dict — the worker sees what's in
     # the DB.
     celery_args = patched_celery.call_args.kwargs.get("args") or patched_celery.call_args.args[1]
     user_vars_arg = celery_args[4]
-    assert user_vars_arg["terraform"]["task_pdf"]["all"]["content_b64"] == _b64(pdf)
+    assert user_vars_arg["tofu"]["task_pdf"]["all"]["content_b64"] == _b64(pdf)
 
 
 @pytest.mark.integration
@@ -216,7 +216,7 @@ def test_detail_endpoint_strips_file_bytes(
     ).json()
 
     detail = client.get(f"/deployments/{create['deploymentId']}").json()
-    upload = detail["userInputVar"]["terraform"]["task_pdf"]["all"]
+    upload = detail["userInputVar"]["tofu"]["task_pdf"]["all"]
     assert upload["name"] == "x.pdf"
     assert upload["size"] == len(pdf)
     assert "content_b64" not in upload

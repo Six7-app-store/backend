@@ -27,7 +27,6 @@ alembic = ">=1.13.1"
 psycopg2-binary = ">=2.9.9"
 pydantic = ">=2.5.3"
 pydantic-settings = ">=2.1.0"
-python-jose = {extras = ["cryptography"], version = ">=3.3.0"}
 passlib = ">=1.7.4"
 bcrypt = ">=4.0.0,<5.0.0"
 python-multipart = ">=0.0.6"
@@ -35,15 +34,15 @@ celery = {extras = ["redis"], version = "^5.3.4"}
 gitpython = ">=3.1.41"
 email-validator = ">=1.3.0"
 python-keycloak = ">=3.9.1"
-# LTI 1.3 (Moodle launch). Brings pyjwt + jwcrypto along; python-jose
-# stays for the Keycloak path, so both JWT libraries are installed.
+# LTI 1.3 (Moodle launch). Brings pyjwt + jwcrypto along.
 pylti1p3 = "^2.0.0"
 requests = ">=2.31.0"
 # Transitive via requests/openstacksdk. Pinned to >=2.8.0 to close
 # PYSEC-2026-4175/4176/4177 (all HIGH). Fixed in 2.8.0.
 urllib3 = ">=2.8.0"
-# Transitive via pylti1p3. Pinned to >=2.15.0 to close PYSEC-2026-4141.
-# Fixed in 2.15.0.
+# All JWT handling (Keycloak, LTI session tokens) goes through PyJWT;
+# python-jose was dropped for CVE-2026-85394 (no upstream fix). Also
+# transitive via pylti1p3. >=2.15.0 closes PYSEC-2026-4141.
 pyjwt = ">=2.15.0"
 openstacksdk = "^3.3.0"
 cryptography = ">=42.0.0"
@@ -148,6 +147,17 @@ addopts = [
     "--cov-report=term-missing",
     "--cov-report=html",
     "--cov-report=xml",
+    # Nimmt das Gate aus jedem pytest-Lauf heraus. Beide CI-Lanes sind
+    # Teillaeufe: ``-m unit`` waehlt 392 Tests ab und kommt auf 49.88 %,
+    # ``-m integration`` waehlt 371 ab und kommt auf 65.13 %. Kombiniert
+    # stehen wir bei 73.99 %. Die Schwelle in einer Lane zu pruefen misst
+    # nur, wie viel vom Gesamtcode zufaellig dort liegt - genau daran
+    # scheiterte der Unit-Job.
+    #
+    # ``coverage report``/``html`` im coverage-Job lesen ``addopts`` nicht
+    # und behalten damit ``fail_under`` weiter unten - dort, auf dem
+    # kombinierten Stand, gehoert das Gate hin.
+    "--cov-fail-under=0",
     # Globaler Per-Test-Timeout: kein einzelner Test darf den
     # Gesamtlauf einfrieren. 60 s ist großzügig für DB-Truncate +
     # FastAPI-TestClient-Lifecycle, aber knapp genug, dass ein
@@ -188,7 +198,18 @@ omit = [
 precision = 2
 show_missing = true
 skip_covered = false
-fail_under = 50
+# Ratsche gegen Degradation. Nie senken.
+#
+# Von 50 auf 70 gezogen: der kombinierte Lauf aus Unit- und
+# Integration-Lane steht bei 73.99 %. Die 50 waren nie erreichbar, wo
+# sie geprueft wurden - die Unit-Lane allein kam auf 49.46 %, weil sie
+# 392 Tests abwaehlt.
+#
+# Greift ausschliesslich im ``coverage``-Job auf dem kombinierten Stand:
+# ``coverage combine`` gefolgt von ``coverage report``/``html``. Die
+# pytest-Laeufe umgehen den Wert ueber ``--cov-fail-under=0`` in
+# ``addopts`` (Begruendung dort).
+fail_under = 70
 exclude_lines = [
     "pragma: no cover",
     "def __repr__",
@@ -221,7 +242,6 @@ strict_equality = true
 module = [
     "celery.*",
     "passlib.*",
-    "jose.*",
     "git.*",
 ]
 ignore_missing_imports = true

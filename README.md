@@ -97,7 +97,7 @@ app/
 | `celery_event_listener` | Daemon-Thread: konsumiert Celery-Events aus RabbitMQ, schreibt Task-Status in die DB |
 | `reconciler` | Fängt hängende Tasks ab, deren Events verloren gingen (Fallback zum Listener) |
 | `deployment_pubsub` | In-Process-Bridge Listener → SSE-Endpoint (Live-Status) |
-| `deployment_status` | Verheiratet gecachten Terraform-State mit Live-OpenStack-Daten (Infrastructure-Tab) |
+| `deployment_status` | Verheiratet gecachten OpenTofu-State mit Live-OpenStack-Daten (Infrastructure-Tab) |
 | `deployment_notifier` | Baut & versendet Post-Deploy-Mails (User- und Owner-Variante) |
 | `email_service` | SMTP-Versand + Jinja2-Templating für die Mails |
 | `task_service` | Zwei-Phasen-Dispatch: PENDING-Row in Tx anlegen, dann Celery-Enqueue |
@@ -106,7 +106,7 @@ app/
 | `openstack_client` | Gemeinsamer OpenStack-Client-Layer (per-User-`Connection`) |
 | `openstack_validator` | Prüft Credentials gegen das Ziel-Keystone (Upsert + `/test`) |
 | `clouds_yaml_parser` | Parst rohes `clouds.yaml` in ein Credential-Schema |
-| `tf_state_parser` | Liest den in `Task.tf_state` persistierten Terraform-State |
+| `tofu_state_parser` | Liest den in `Task.tf_state` persistierten OpenTofu-State |
 
 **utils/** — `keycloak_auth` (Token-Validierung), `permissions` + `capabilities` (rollenbasierte `can_*`/`ensure_*`-Checks), `crypto` (Fernet-Verschlüsselung at-rest, Key geteilt mit dem Worker), `app_image` (Data-URL ↔ Bytes), `time`.
 

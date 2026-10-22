@@ -29,8 +29,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -sSL https://install.python-poetry.org | python3 - && \
     ln -s /root/.local/bin/poetry /usr/local/bin/poetry
 
-# Copy dependency files
-COPY pyproject.toml ./
+# Copy dependency files. The lock file is required: without it poetry
+# resolves fresh and pulls whatever is newest — SQLAlchemy 2.1 then
+# expects the psycopg (v3) driver, and the backend no longer starts.
+COPY pyproject.toml poetry.lock ./
 
 # Install Python dependencies (ohne Projekt selbst)
 RUN poetry install --no-root --no-interaction --no-ansi

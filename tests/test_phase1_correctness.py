@@ -377,7 +377,7 @@ def _deployment_with_upload(db, owner, filename):
     dep = _deployment(db, owner, _app(db, owner))
     payload = b"inhalt"
     dep.userInputVar = json.dumps({
-        "terraform": {
+        "tofu": {
             "task_file": {
                 "all": {
                     "name": filename,
