@@ -45,6 +45,7 @@ def _smtp_enabled(monkeypatch):
     monkeypatch.setattr(settings, "SMTP_ENABLED", True, raising=False)
     monkeypatch.setattr(settings, "SMTP_USER", "test@example.com", raising=False)
     monkeypatch.setattr(settings, "SMTP_PASSWORD", "test-password", raising=False)
+    monkeypatch.setattr(settings, "SMTP_HOST", "mail.example.org", raising=False)
 
 
 def _seed_deployment_with_team(
@@ -346,6 +347,7 @@ def test_resend_access_returns_503_when_smtp_credentials_missing(
     monkeypatch.setattr(settings, "SMTP_ENABLED", True, raising=False)
     monkeypatch.setattr(settings, "SMTP_USER", "", raising=False)
     monkeypatch.setattr(settings, "SMTP_PASSWORD", "", raising=False)
+    monkeypatch.setattr(settings, "SMTP_FROM_EMAIL", "", raising=False)
     deployment, team = _seed_deployment_with_team(db, mock_user, member=mock_user)
 
     with patch(
