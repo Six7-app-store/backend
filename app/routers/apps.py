@@ -165,12 +165,10 @@ def get_app(
 
     if app.git_link:
         try:
+            # Keep the version dicts (tag + commit + release info) — the
+            # response schema and the app's versions tab expect them.
             versions = git_service.get_versions(app.git_link)
-            app.versions = [
-                _version_tag(v)
-                for v in versions
-                if _version_tag(v)
-            ]
+            app.versions = [v for v in versions if _version_tag(v)]
         except Exception as e:
             app.versions = []
             logger.warning(f"Could not fetch versions: {str(e)}")
