@@ -441,3 +441,86 @@ def test_redeploy_rejects_unknown_address(
     assert response.status_code == 404
     assert response.json()["detail"]["reason"] == "resource_not_in_state"
     assert not patched_celery_send.called
+
+
+# ----------------------------------------------------------------
+# POST /resources/{address}/reboot — whitelist + dispatch
+# ----------------------------------------------------------------
+@pytest.mark.integration
+def test_reboot_resource_dispatches_celery_task(
+    client, db, mock_user, patched_user_connection, patched_celery_send
+):
+    _ensure_user_credentials(db, mock_user)
+    app_row = _ensure_app(db, mock_user)
+    deployment = _seed_deployment_with_state(db, mock_user, app_row)
+
+    response = client.post(
+        f"/deployments/{deployment.deploymentId}/resources/{ADDR_A}/reboot"
+    )
+    assert response.status_code == 202
+    assert response.json()["status"] == "rebooting"
+
+    # The worker gets the address AND the server id of exactly that VM,
+    # so the reboot can't reach Team-B's instance.
+    patched_celery_send.assert_called_once()
+    name = patched_celery_send.call_args.args[0]
+    args = patched_celery_send.call_args.kwargs["args"]
+    assert name == "tasks.reboot_resource"
+    assert len(args) == 9
+    assert args[-2:] == [ADDR_A, "uuid-vm-a"]
+
+    task = (
+        db.query(Task)
+        .filter(Task.deploymentId == deployment.deploymentId)
+        .filter(Task.type == TaskType.REBOOT)
+        .one()
+    )
+    assert task.status == TaskStatus.PENDING
+
+
+@pytest.mark.integration
+def test_reboot_rejects_network_address(
+    client, db, mock_user, patched_user_connection, patched_celery_send
+):
+    _ensure_user_credentials(db, mock_user)
+    app_row = _ensure_app(db, mock_user)
+    deployment = _seed_deployment_with_state(db, mock_user, app_row)
+
+    response = client.post(
+        f"/deployments/{deployment.deploymentId}/resources/{ADDR_NETWORK}/reboot"
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"]["reason"] == "non_redeployable_resource_type"
+    assert not patched_celery_send.called
+
+
+@pytest.mark.integration
+def test_reboot_rejects_unknown_address(
+    client, db, mock_user, patched_user_connection, patched_celery_send
+):
+    _ensure_user_credentials(db, mock_user)
+    app_row = _ensure_app(db, mock_user)
+    deployment = _seed_deployment_with_state(db, mock_user, app_row)
+
+    bogus = 'openstack_compute_instance_v2.team_ide["Team-Z"]'
+    response = client.post(
+        f"/deployments/{deployment.deploymentId}/resources/{bogus}/reboot"
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"]["reason"] == "resource_not_in_state"
+    assert not patched_celery_send.called
+
+
+@pytest.mark.integration
+def test_reboot_rejects_invalid_address(
+    client, db, mock_user, patched_user_connection, patched_celery_send
+):
+    _ensure_user_credentials(db, mock_user)
+    app_row = _ensure_app(db, mock_user)
+    deployment = _seed_deployment_with_state(db, mock_user, app_row)
+
+    response = client.post(
+        f"/deployments/{deployment.deploymentId}/resources/foo;rm -rf /reboot"
+    )
+    assert response.status_code == 422
+    assert not patched_celery_send.called

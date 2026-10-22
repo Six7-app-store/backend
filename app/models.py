@@ -47,6 +47,9 @@ class TaskType(str, enum.Enum):
     # ``tofu apply -replace=<addr> -target=<addr>``, without
     # touching the other team VMs of the same deployment.
     REDEPLOY = "redeploy"
+    # Hard reboot of ONE Compute-Instance via ``openstack server reboot
+    # --hard``. Disk, IPs and state stay; the other VMs are untouched.
+    REBOOT = "reboot"
 
 
 class TaskStatus(str, enum.Enum):

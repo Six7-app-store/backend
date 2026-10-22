@@ -114,6 +114,23 @@ def test_app_list_and_detail_carry_latest_approved_version(client, db, mock_user
     assert detail["latestApprovedVersion"] == "v1.2.0"
 
 
+@pytest.mark.integration
+def test_app_detail_returns_git_versions_as_objects(client, db, mock_user):
+    """Regression: the detail used to flatten the versions to strings,
+    which the response schema rejects with a 500."""
+    app = create_app_in_db(db, mock_user)
+    versions = [
+        {"version": "v1.0.1", "commit": "abc12345", "type": "tag", "description": None},
+        {"version": "v1.0.0", "commit": "def67890", "type": "tag"},
+    ]
+
+    with patch("app.routers.apps.git_service.get_versions", return_value=versions):
+        response = client.get(f"/apps/{app.appId}")
+
+    assert response.status_code == 200
+    assert [v["version"] for v in response.json()["versions"]] == ["v1.0.1", "v1.0.0"]
+
+
 # ----------------------------------------------------------------
 # Version on POST /deployments
 # ----------------------------------------------------------------
