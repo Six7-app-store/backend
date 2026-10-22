@@ -194,6 +194,10 @@ class AppResponse(AppBase):
     # Data-URL or null. Populated from ``app.image`` + ``app.image_mime``
     # by ``serialize_app_image``; the raw bytes never leave the backend.
     image: str | None = None
+    # Newest approved version tag; ``None`` while none is approved. Set by
+    # the list and detail endpoints so the wizard can preselect a version
+    # without asking Git.
+    latestApprovedVersion: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

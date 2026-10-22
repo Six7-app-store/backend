@@ -97,6 +97,44 @@ def has_approved_version(db: Session, app_id: UUID, version_tag: str) -> bool:
     ) is not None
 
 
+def _version_sort_key(tag: str) -> tuple:
+    """Order of version tags, newest last: numeric ``v1.2.3`` tags by
+    their numbers (as ``git_service.get_versions`` sorts them), any other
+    tag below them by name."""
+    try:
+        return (1, tuple(int(part) for part in tag.lstrip("v").split(".")))
+    except ValueError:
+        return (0, (tag,))
+
+
+def latest_approved_versions(db: Session, app_ids: list[UUID]) -> dict[UUID, str]:
+    """The newest approved version tag per app, for the apps that have one.
+
+    One query for any number of apps, and no Git round-trip: the wizard
+    preselects this version, so it must be cheap enough for the app list.
+    """
+    if not app_ids:
+        return {}
+    rows = (
+        db.query(AppVersionApproval.appId, AppVersionApproval.version_tag)
+        .filter(
+            AppVersionApproval.appId.in_(app_ids),
+            AppVersionApproval.status == AppVersionApprovalStatus.APPROVED,
+        )
+        .all()
+    )
+    newest: dict[UUID, str] = {}
+    for app_id, tag in rows:
+        if app_id not in newest or _version_sort_key(tag) > _version_sort_key(newest[app_id]):
+            newest[app_id] = tag
+    return newest
+
+
+def latest_approved_version(db: Session, app_id: UUID) -> str | None:
+    """The newest approved version tag of one app, or ``None``."""
+    return latest_approved_versions(db, [app_id]).get(app_id)
+
+
 def has_any_approved_version(db: Session, app_id: UUID) -> bool:
     """Return True if the app has at least one approved version."""
     return (

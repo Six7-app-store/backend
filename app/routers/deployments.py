@@ -752,6 +752,97 @@ def _validate_scoped_user_input(
                 )
 
 
+def _slot_username(user: User) -> str:
+    """The name a person's slot is keyed by — mirror of the wizard's
+    ``useWizardTeams``: username, else the email's local part, else the
+    first name, else the start of the id."""
+    return (
+        user.username
+        or (user.email or "").split("@")[0]
+        or user.firstName
+        or str(user.userId)[:8]
+    )
+
+
+def _expected_slots(scope: str, teams_payload: list, db: Session) -> list[str]:
+    """Every slot a scoped variable needs for this roster: one per team,
+    or ``TeamName-Username`` per member."""
+    slots: list[str] = []
+    for team in teams_payload or []:
+        if scope == "team":
+            slots.append(team.name)
+            continue
+        for user_id in team.userIds:
+            user = crud_users.get_user(db, user_id)
+            if user:
+                slots.append(f"{team.name}-{_slot_username(user)}")
+    return slots
+
+
+def _is_unfilled(value) -> bool:
+    """``None``, blank text, an empty list or map — or a file without bytes."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip() == ""
+    if isinstance(value, (list, dict)) and len(value) == 0:
+        return True
+    return isinstance(value, dict) and "content_b64" in value and not value.get("content_b64")
+
+
+def _validate_required_inputs(
+    user_input_var: dict | None,
+    variable_definitions: list[dict],
+    teams_payload: list,
+    db: Session,
+) -> None:
+    """Reject the create when a required variable or file is missing.
+
+    A variable without a default is required. Unscoped ones need a value;
+    team/user scoped ones and file variables a value in every slot of the
+    roster (``all`` for a file for everybody). Run after the files are
+    folded into ``userInputVar.tofu`` and after the slot identities were
+    checked, so this only answers "is anything left empty?".
+
+    Without it a missing task file only surfaces in the worker, minutes
+    later, as an OpenTofu error. Raises 422 with
+    ``reason="required_missing"`` and every gap as ``{variable, slot?}``.
+    """
+    block = (user_input_var or {}).get("tofu")
+    block = block if isinstance(block, dict) else {}
+    missing: list[dict] = []
+    for vdef in variable_definitions:
+        if not vdef.get("required"):
+            continue
+        name = vdef["name"]
+        is_file = vdef.get("osType") == "file"
+        scope = (
+            (vdef.get("osScope") or vdef.get("varScope")) if is_file else vdef.get("varScope")
+        ) or "all"
+        value = block.get(name)
+        if scope == "all":
+            filled = (
+                isinstance(value, dict) and not _is_unfilled(value.get("all"))
+                if is_file
+                else not _is_unfilled(value)
+            )
+            if not filled:
+                missing.append({"variable": name})
+            continue
+        slot_map = value if isinstance(value, dict) else {}
+        slots = _expected_slots(scope, teams_payload, db)
+        if not slots and not is_file:
+            missing.append({"variable": name})
+        missing.extend(
+            {"variable": name, "slot": slot} for slot in slots if _is_unfilled(slot_map.get(slot))
+        )
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"reason": "required_missing", "missing": missing},
+        )
+
+
 def _strip_file_vars_from_user_input(user_input_var: dict | None) -> dict | None:
     """Strip per-file ``content_b64`` payloads from a userInputVar dict.
 
@@ -897,26 +988,33 @@ def create_deployment(
     # endpoint when visibility is denied.
     ensure_view_app(current_user, target_app, db=db)
 
+    # The version is chosen, never guessed: there used to be a "main"
+    # fallback here, and the wizard sent "latest" — neither is a release
+    # anyone approved.
+    if not deployment.releaseTag:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"reason": "version_required"},
+        )
     # Seeing the app only means SOME version is approved. The version being
     # deployed has to be one, unless the caller owns the app or is an admin.
     ensure_deploy_version(current_user, target_app, deployment.releaseTag, db)
 
     # Load the app author's variable declarations so we can enforce
-    # per-variable contracts (``varScope``, ``fileExtensions``) below.
-    # We only do this when the request actually carries variables /
-    # files — for a no-input deploy the round-trip into Git would be
-    # waste. Same parser as ``GET /apps/{id}/variables`` so client and
-    # server agree on which variable is scoped/file/free-text.
+    # per-variable contracts (``varScope``, ``fileExtensions``, required
+    # inputs) below. Same parser as ``GET /apps/{id}/variables`` so
+    # client and server agree on which variable is scoped/file/required.
+    # Loaded for every deploy, also one without inputs: that is exactly
+    # the request that forgot a required file.
     variable_definitions: list[dict] = []
-    if deployment.userInputVar or deployment.files:
-        release_tag = deployment.releaseTag or "main"
+    if target_app.git_link:
         try:
-            variable_definitions = load_variable_definitions(target_app, release_tag)
+            variable_definitions = load_variable_definitions(target_app, deployment.releaseTag)
         except HTTPException as exc:
             if exc.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY:
                 raise
-            # 400 (no git_link) or 500 (git unreachable) — skip validation,
-            # proceed without variable definitions.
+            # 500 (git unreachable) — skip validation, proceed without
+            # variable definitions; the worker still fails loudly.
 
     # Fold the wizard's parallel ``files`` upload into
     # ``userInputVar.tofu`` before the row gets persisted, so the
@@ -939,6 +1037,12 @@ def create_deployment(
             deployment.userInputVar,
             variable_definitions,
             deployment.teams or [],
+        )
+        _validate_required_inputs(
+            deployment.userInputVar,
+            variable_definitions,
+            deployment.teams or [],
+            db,
         )
 
     db_deployment = crud_deployments.create_deployment(

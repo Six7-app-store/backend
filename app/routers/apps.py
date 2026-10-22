@@ -135,6 +135,9 @@ def list_apps(
         apps = crud_apps.get_apps(db, skip=skip, limit=limit)
     else:
         apps = crud_apps.get_visible_apps(db, current_user.userId, skip=skip, limit=limit)
+    latest = crud_approvals.latest_approved_versions(db, [a.appId for a in apps])
+    for a in apps:
+        a.latestApprovedVersion = latest.get(a.appId)
     return [_serialize_app(a) for a in apps]
 
 
@@ -174,6 +177,7 @@ def get_app(
     else:
         app.versions = []
 
+    app.latestApprovedVersion = crud_approvals.latest_approved_version(db, app.appId)
     return _serialize_app(app)
 
 
