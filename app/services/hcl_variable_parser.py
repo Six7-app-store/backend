@@ -848,7 +848,7 @@ def _coerce_hcl_default(raw_default: str, var_type: str) -> tuple[Any, bool]:
 def _allowed_values(var_name: str, var_block: str) -> list[Any] | None:
     """Closed value set from a ``validation`` block, if the variable has one.
 
-    Recognises the idiom Terraform authors use for enums::
+    Recognises the idiom OpenTofu authors use for enums::
 
         validation {
           condition     = contains(["ipv4", "ipv6", "dual"], var.ip_mode)
@@ -858,7 +858,7 @@ def _allowed_values(var_name: str, var_block: str) -> list[Any] | None:
     optionally with the list wrapped in ``toset(...)``/``tolist(...)``.
     Only string/number/bool literals count: anything referring to a
     local or another variable is not knowable here, so the variable
-    stays free text and Terraform remains the only check. Returns
+    stays free text and OpenTofu remains the only check. Returns
     ``None`` when there is no such validation.
     """
     pattern = (
