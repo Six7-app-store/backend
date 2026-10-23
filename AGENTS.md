@@ -45,6 +45,9 @@ Ohne `TEST_DATABASE_URL` leert die Suite die **Dev**-Datenbank. Deshalb immer
 - Coverage nicht gesunken (`fail_under = 50` in `pyproject.toml`)
 - Modelländerung? Migration im selben Commit
 - Architekturentscheidung getroffen? ADR unter `deployment/docs/adr/`
+- Doku und Diagramme in `deployment/docs/` nachgezogen, wo `deployment/harness/doc-map.json` sie diesem Code zuordnet (Skill
+  `doku-nachziehen`). Das Commit-Gate fährt davor Doku-Zuordnung, Lint und
+  Tests im Container — der Stack muss laufen (ADR 0017)
 
 ## Nicht anfassen
 
