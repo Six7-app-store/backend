@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 from app.models import User
 from app.services.openstack_client import user_connection
 from app.services.tofu_state_parser import TfResource, parse_tf_state
+from app.utils.time import utc_isoformat
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,7 @@ class HardwareSpec:
     # stage-2 fills it via ``conn.image.find_image``.
     image_name: str | None = None
     availability_zone: str | None = None
-    # ISO-8601 timestamp from ``OS-SRV-USG:launched_at``; the frontend
+    # ISO-8601 timestamp from ``OS-SRV-USG:launched_at``, marked as UTC; the frontend
     # computes uptime against ``now``.
     launched_at: str | None = None
 
@@ -485,7 +486,7 @@ def _hardware_from(server: Any) -> HardwareSpec:
         image_id=image_id,
         image_name=None,  # filled by stage-2 only
         availability_zone=getattr(server, "availability_zone", None),
-        launched_at=getattr(server, "launched_at", None),
+        launched_at=utc_isoformat(getattr(server, "launched_at", None)),
     )
 
 

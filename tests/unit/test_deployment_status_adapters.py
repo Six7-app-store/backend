@@ -253,6 +253,14 @@ def test_hardware_from_flavor_as_dict_and_image_as_dict() -> None:
 
 
 @pytest.mark.unit
+def test_hardware_from_marks_launched_at_without_offset_as_utc() -> None:
+    """Nova liefert ``launched_at`` ohne Offset; der Browser laese das als Ortszeit."""
+    server = SimpleNamespace(launched_at="2026-10-24T12:59:58.000000")
+    hw = _hardware_from(server)
+    assert hw.launched_at == "2026-10-24T12:59:58+00:00"
+
+
+@pytest.mark.unit
 def test_hardware_from_flavor_as_object_is_coerced() -> None:
     """flavor als getypter SDK-Objekt-Wert (Munch) wird best-effort geparst."""
     flavor_obj = SimpleNamespace(
