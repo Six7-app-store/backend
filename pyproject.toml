@@ -50,8 +50,9 @@ PyYAML = ">=6.0"
 jinja2 = ">=3.1.0"
 # Transitive via pbr. Pinned to >=83.0.0 to close PYSEC-2026-3447
 # (CVE-2026-59890): MANIFEST.in exclusions bypassed on macOS APFS/HFS+
-# via NFD filenames. Fixed in 83.0.0.
-setuptools = ">=83.0.0"
+# via NFD filenames. Fixed in 83.0.0. Raised to >=84.1.0 for
+# GHSA-xmj3-9gf7-h52w (pip-audit, 24.10.2026).
+setuptools = ">=84.1.0"
 
 [tool.poetry.group.dev.dependencies]
 # Poetry 2.x dependency-group syntax. The older
