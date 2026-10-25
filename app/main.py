@@ -28,6 +28,7 @@ from app.routers import (
 from app.services.celery_event_listener import start_event_listener
 from app.services.deployment_pubsub import pubsub
 from app.services.reconciler import run_reconciler
+from app.services.vm_presence import run_vm_presence_check
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,10 @@ async def lifespan(app: FastAPI):
     reconciler_task = asyncio.create_task(run_reconciler())
     logger.info("Reconciler loop scheduled")
 
+    # Flags deployments whose VMs were deleted outside the App Store.
+    vm_presence_task = asyncio.create_task(run_vm_presence_check())
+    logger.info("VM presence loop scheduled")
+
     logger.info("Application started")
 
     try:
@@ -87,13 +92,17 @@ async def lifespan(app: FastAPI):
     finally:
         # Shutdown
         logger.info("=== Application Shutting Down ===")
-        reconciler_task.cancel()
-        try:
-            await reconciler_task
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            logger.exception("Reconciler task raised on shutdown")
+        for name, bg_task in (
+            ("Reconciler", reconciler_task),
+            ("VM presence", vm_presence_task),
+        ):
+            bg_task.cancel()
+            try:
+                await bg_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("%s task raised on shutdown", name)
         logger.info("Shutdown complete")
 
 
