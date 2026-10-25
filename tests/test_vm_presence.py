@@ -3,7 +3,8 @@
 Covers:
  * ``vms_missing`` verdict from per-instance drift values
  * ``check_deployments`` setting / clearing ``vm_missing_since``
- * ``DELETE /deployments/{id}?entry_only=true`` gating
+ * ``DELETE /deployments/{id}?entry_only=true`` gating (VMs missing, or
+   the last destroy failed)
  * ``vm_missing_since`` on the list response
 
 The OpenStack ``Connection`` is mocked via
@@ -231,6 +232,30 @@ def test_entry_only_delete_soft_deletes_when_vms_missing(client, db, mock_user):
     send.assert_not_called()
     db.refresh(deployment)
     assert deployment.deleted_at is not None
+
+
+@pytest.mark.integration
+def test_entry_only_delete_allowed_after_failed_destroy(client, db, mock_user):
+    """A destroy that cannot run (app repo deleted) must not trap the entry."""
+    deployment = _seed(db, mock_user, task_type=TaskType.DESTROY, task_status=TaskStatus.FAILED)
+
+    with patch("app.services.task_service.celery_app.send_task") as send:
+        response = client.delete(f"/deployments/{deployment.deploymentId}?entry_only=true")
+
+    assert response.status_code == 204
+    send.assert_not_called()
+    db.refresh(deployment)
+    assert deployment.deleted_at is not None
+
+
+@pytest.mark.integration
+def test_entry_only_delete_rejected_after_failed_deploy(client, db, mock_user):
+    """A failed deploy can still be destroyed — no shortcut there."""
+    deployment = _seed(db, mock_user, task_status=TaskStatus.FAILED)
+
+    response = client.delete(f"/deployments/{deployment.deploymentId}?entry_only=true")
+
+    assert response.status_code == 409
 
 
 @pytest.mark.integration

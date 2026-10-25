@@ -1164,9 +1164,10 @@ def create_deployment(
 #                               → 409, the user has to wait.
 #
 # ``?entry_only=true`` skips the destroy and soft-deletes straight away.
-# Only allowed while ``vm_missing_since`` is set: the VMs are already
-# gone from OpenStack, and a tofu destroy against what is left may not
-# get through. Leftover networks/volumes stay in the user's project.
+# Only allowed where a destroy cannot help: while ``vm_missing_since`` is
+# set (the VMs are already gone from OpenStack), or when the last destroy
+# itself failed (e.g. the app repo was deleted, so the worker has no tofu
+# code to run). Leftover resources stay in the user's project.
 #
 # Frontend doesn't have to know the difference — it just calls DELETE
 # and switches into the live-stream view when the response is 202.
@@ -1216,12 +1217,18 @@ def delete_deployment(
         )
 
     if entry_only:
-        if deployment.vm_missing_since is None:
+        latest = crud_deployments.get_latest_task(db, deployment_id)
+        destroy_failed = (
+            latest is not None
+            and latest.type == TaskType.DESTROY
+            and latest.status == TaskStatus.FAILED
+        )
+        if deployment.vm_missing_since is None and not destroy_failed:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
                     "entry_only is only allowed when the deployment's VMs "
-                    "are missing from OpenStack."
+                    "are missing from OpenStack or its last destroy failed."
                 ),
             )
         crud_deployments.soft_delete_deployment(db, deployment_id)
