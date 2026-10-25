@@ -242,6 +242,7 @@ def list_deployments(
             userInputVar=user_input_var_parsed,
             status=status_value,
             created_at=first_created_at,
+            vm_missing_since=deployment.vm_missing_since,
         ))
 
     return result
@@ -363,6 +364,7 @@ def get_deployment(
         userInputVar=user_input_var_parsed,
         status=status_value,
         created_at=created_at,
+        vm_missing_since=deployment.vm_missing_since,
         user=deployment.user,
         app=serialised_app,
         teams=teams,
@@ -1161,11 +1163,17 @@ def create_deployment(
 #   * any other status (running / pending / destroying / pausing / resuming)
 #                               → 409, the user has to wait.
 #
+# ``?entry_only=true`` skips the destroy and soft-deletes straight away.
+# Only allowed while ``vm_missing_since`` is set: the VMs are already
+# gone from OpenStack, and a tofu destroy against what is left may not
+# get through. Leftover networks/volumes stay in the user's project.
+#
 # Frontend doesn't have to know the difference — it just calls DELETE
 # and switches into the live-stream view when the response is 202.
 @router.delete("/{deployment_id}")
 def delete_deployment(
     deployment_id: UUID,
+    entry_only: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1206,6 +1214,18 @@ def delete_deployment(
                 "Wait for the active task to finish."
             ),
         )
+
+    if entry_only:
+        if deployment.vm_missing_since is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "entry_only is only allowed when the deployment's VMs "
+                    "are missing from OpenStack."
+                ),
+            )
+        crud_deployments.soft_delete_deployment(db, deployment_id)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     # Resources may exist — destroy them first; the listener will
     # auto-soft-delete the row when the destroy task succeeds. ``paused``

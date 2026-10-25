@@ -299,6 +299,9 @@ class DeploymentResponse(DeploymentBase):
     userInputVar: dict[str, Any] | None = None
     status: str | None = None  # From latest task
     created_at: UtcDatetime | None = None
+    # Set when every VM of the deployment is gone from OpenStack; the UI
+    # then offers to remove the entry (see services/vm_presence.py).
+    vm_missing_since: UtcDatetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
