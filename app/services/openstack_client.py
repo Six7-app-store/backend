@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 
 from app.crud import openstack_credentials as crud_creds
 from app.models import User
+from app.utils.openstack_endpoints import ensure_allowed_auth_url
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,7 @@ def user_connection(db: Session, user: User) -> Iterator[Any]:
             detail={"reason": "openstack_credentials_missing"},
         )
 
+    ensure_allowed_auth_url(creds["auth_url"])
     conn = None
     try:
         conn = openstack.connect(**_build_connect_kwargs(creds))

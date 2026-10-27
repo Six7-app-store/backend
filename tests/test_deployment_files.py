@@ -14,6 +14,8 @@ import pytest
 
 from app.models import (
     App,
+    AppVersionApproval,
+    AppVersionApprovalStatus,
     Deployment,
     OpenStackAuthType,
     User,
@@ -50,6 +52,7 @@ def _ensure_app(db, user) -> App:
         git_link="https://example.com/repo.git",
     )
     db.add(app)
+    db.add(AppVersionApproval(appId=app.appId, version_tag="v1", status=AppVersionApprovalStatus.APPROVED))
     db.commit()
     db.refresh(app)
     return app

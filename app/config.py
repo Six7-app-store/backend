@@ -21,12 +21,23 @@ class Settings(BaseSettings):
     # a GitLab instance. A self-hosted GitLab has to be added here, e.g.
     # GIT_ALLOWED_HOSTS='["github.com","gitlab.com","gitlab.example.edu"]'
     GIT_ALLOWED_HOSTS: list[str] = ["github.com", "gitlab.com"]
+    REQUIRE_PINNED_RELEASES: bool = False
+
+    # Exact Keystone URLs approved by the operator. Empty is for local
+    # development only; production compose requires an explicit list.
+    OPENSTACK_ALLOWED_AUTH_URLS: list[str] = []
+    OPENSTACK_ENFORCE_ALLOWED_AUTH_URLS: bool = False
 
     # Keycloak — single source of truth for authentication
     KEYCLOAK_SERVER_URL: str = "http://keycloak:8080"
     KEYCLOAK_REALM: str = "dhbw"
     KEYCLOAK_CLIENT_ID: str = "appstore-backend"
     KEYCLOAK_CLIENT_SECRET: str = ""  # Set via environment variable
+    # Public issuer must be the exact `iss` in tokens, not the internal
+    # container URL used to reach the Keycloak admin API.
+    KEYCLOAK_TOKEN_ISSUER: str = "http://localhost:8080/realms/dhbw"
+    KEYCLOAK_TOKEN_AUDIENCE: str = "appstore-backend"
+    KEYCLOAK_ENFORCE_TOKEN_BINDING: bool = False
 
     # CORS
     CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:5173"]

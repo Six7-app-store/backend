@@ -525,8 +525,14 @@ class GitService:
             with (git_dir / 'config').open('a') as f:
                 f.write('[core]\n\tsparseCheckout = true\n')
 
-            origin.fetch(refspec=f'refs/tags/{tag}:refs/tags/{tag}', depth=1)
-            repo.git.checkout(f'refs/tags/{tag}', force=True)
+            if re.fullmatch(r'[0-9a-f]{40}', tag):
+                origin.fetch(tag, depth=1)
+                repo.git.checkout('FETCH_HEAD', force=True)
+                if repo.head.commit.hexsha != tag:
+                    raise ValueError('Fetched commit does not match the expected commit')
+            else:
+                origin.fetch(refspec=f'refs/tags/{tag}:refs/tags/{tag}', depth=1)
+                repo.git.checkout(f'refs/tags/{tag}', force=True)
 
             logger.info(f"Cloned successfully: {repo.head.commit.hexsha[:8]}")
             return str(repo_path)

@@ -185,6 +185,7 @@ class Deployment(Base):
     deploymentId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String, nullable=False)
     releaseTag = Column(String, nullable=True)
+    release_commit = Column(String(40), nullable=True)
     userInputVar = Column(Text, nullable=True)  # could also be JSON
     userId = Column(UUID(as_uuid=True), ForeignKey("users.userId"), nullable=False, index=True)
     appId = Column(UUID(as_uuid=True), ForeignKey("apps.appId"), nullable=False, index=True)
@@ -409,6 +410,7 @@ class AppVersionApproval(Base):
         index=True,
     )
     version_tag = Column(String, nullable=False)
+    commit_sha = Column(String(40), nullable=True)
     status = Column(
         Enum(AppVersionApprovalStatus),
         nullable=False,

@@ -14,6 +14,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
+from app.config import settings
+from app.crud import app_version_approvals as crud_approvals
 from app.crud import apps as crud_apps
 from app.crud import deployments as crud_deployments
 from app.crud import locks as crud_locks
@@ -44,6 +46,7 @@ from app.services.deployment_status import (
     build_resource_views,
 )
 from app.services.hcl_variable_parser import load_variable_definitions
+from app.services.release_pinning import resolve_tag
 from app.services.tofu_state_parser import parse_tf_state
 from app.utils.auth import get_current_user
 from app.utils.capabilities import (
@@ -56,9 +59,9 @@ from app.utils.capabilities import (
     ensure_view_deployment_owner,
     get_my_course_teacher_ids,
 )
+from app.utils.openstack_endpoints import ensure_allowed_auth_url
 from app.utils.permissions import (
     ensure_deployment_access,
-    is_deployment_owner_view,
 )
 
 logger = logging.getLogger(__name__)
@@ -231,7 +234,14 @@ def list_deployments(
         # view doesn't ship megabytes of base64 to the browser; the
         # detail endpoint follows the same rule, and the dedicated
         # download route is the only path that returns raw bytes.
-        user_input_var_parsed = _parse_and_strip_user_input(deployment.userInputVar)
+        # Staff lists contain only owned or course-scoped deployments; member
+        # lists can include deployments owned by someone else. Inputs may
+        # contain passwords, so members must not receive them.
+        user_input_var_parsed = (
+            _parse_and_strip_user_input(deployment.userInputVar)
+            if is_staff or deployment.userId == current_user.userId
+            else None
+        )
 
         result.append(DeploymentResponse(
             deploymentId=deployment.deploymentId,
@@ -342,7 +352,9 @@ def get_deployment(
     # Parse userInputVar JSON string back to dict if it exists. Same
     # strip-file-bytes treatment as the list endpoint — base64
     # payloads are surfaced via the download route, not the JSON view.
-    user_input_var_parsed = _parse_and_strip_user_input(deployment.userInputVar)
+    user_input_var_parsed = (
+        _parse_and_strip_user_input(deployment.userInputVar) if is_owner_view else None
+    )
 
     # ``deployment.app`` is the raw ORM relation whose ``image`` column
     # carries bytes. Pydantic's ``DeploymentDetail`` declares
@@ -984,7 +996,7 @@ def create_deployment(
     # Gate the create on the same visibility rule the list/detail
     # endpoints use. A student cannot deploy a private app they don't
     # own, and a non-owner cannot deploy an app without an approved
-    # version. The owner / admin path stays open.
+    # version. The app owner may view their unapproved app but may not deploy it.
     # ``ensure_view_app`` raises 403 with the structured payload, so
     # the frontend receives the same shape it sees on the detail
     # endpoint when visibility is denied.
@@ -999,8 +1011,27 @@ def create_deployment(
             detail={"reason": "version_required"},
         )
     # Seeing the app only means SOME version is approved. The version being
-    # deployed has to be one, unless the caller owns the app or is an admin.
+    # deployed has to be one, unless the caller is an admin.
     ensure_deploy_version(current_user, target_app, deployment.releaseTag, db)
+
+    release_commit = None
+    if settings.REQUIRE_PINNED_RELEASES:
+        if not target_app.git_link:
+            raise HTTPException(status_code=422, detail={"reason": "repository_required"})
+        if current_user.role == UserRole.ADMIN:
+            approved = next(
+                (entry for entry in crud_approvals.get_approvals_for_app(db, target_app.appId)
+                 if entry.version_tag == deployment.releaseTag and entry.status.value == "approved"),
+                None,
+            )
+            if approved and not approved.commit_sha:
+                raise HTTPException(status_code=409, detail={"reason": "approval_commit_missing"})
+            release_commit = approved.commit_sha if approved else resolve_tag(target_app.git_link, deployment.releaseTag)
+        else:
+            approval = crud_approvals._get_approval_or_404(db, target_app.appId, deployment.releaseTag)
+            release_commit = approval.commit_sha
+            if not release_commit:
+                raise HTTPException(status_code=409, detail={"reason": "approval_commit_missing"})
 
     # Load the app author's variable declarations so we can enforce
     # per-variable contracts (``varScope``, ``fileExtensions``, required
@@ -1011,9 +1042,9 @@ def create_deployment(
     variable_definitions: list[dict] = []
     if target_app.git_link:
         try:
-            variable_definitions = load_variable_definitions(target_app, deployment.releaseTag)
+            variable_definitions = load_variable_definitions(target_app, release_commit or deployment.releaseTag)
         except HTTPException as exc:
-            if exc.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY:
+            if settings.REQUIRE_PINNED_RELEASES or exc.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY:
                 raise
             # 500 (git unreachable) — skip validation, proceed without
             # variable definitions; the worker still fails loudly.
@@ -1050,6 +1081,7 @@ def create_deployment(
     db_deployment = crud_deployments.create_deployment(
         db, deployment, current_user.userId
     )
+    db_deployment.release_commit = release_commit
 
     user_ids_in_deployment = set()
     if deployment.teams:
@@ -1115,7 +1147,7 @@ def create_deployment(
             str(db_deployment.deploymentId),
             str(db_deployment.appId),
             db_deployment.app.git_link,
-            db_deployment.releaseTag,
+            db_deployment.release_commit or db_deployment.releaseTag,
             user_vars,
             teams_dict,
             openstack_envelope,
@@ -1265,7 +1297,9 @@ def _fetch_dispatch_envelope(db: Session, user_id, *, rollback_on_missing: bool)
     pending insert and pass ``False``.
     """
     try:
-        return crud_openstack_credentials.get_dispatch_envelope(db, user_id)
+        envelope = crud_openstack_credentials.get_dispatch_envelope(db, user_id)
+        ensure_allowed_auth_url(envelope["auth_url"])
+        return envelope
     except crud_openstack_credentials.NoCredentialError:
         if rollback_on_missing:
             db.rollback()
@@ -1384,6 +1418,8 @@ def _dispatch_lifecycle_task(
                              targeted resource address (and, for reboot,
                              the OpenStack server id).
     """
+    if settings.REQUIRE_PINNED_RELEASES and not deployment.release_commit:
+        raise HTTPException(status_code=409, detail={"reason": "deployment_commit_missing"})
     try:
         user_vars = json.loads(deployment.userInputVar) if deployment.userInputVar else {}
     except Exception:
@@ -1447,7 +1483,7 @@ def _dispatch_lifecycle_task(
             str(deployment.deploymentId),
             str(deployment.appId),
             deployment.app.git_link,
-            deployment.releaseTag,
+            deployment.release_commit or deployment.releaseTag,
             user_vars,
             teams_dict,
             openstack_envelope,
@@ -2084,11 +2120,7 @@ def resend_access_credentials(
     # This 403 is decided BEFORE the SMTP-disabled 503 below: a
     # not-authorised caller must not learn the SMTP-state of the
     # platform — that would be a (small) information disclosure.
-    if not is_deployment_owner_view(deployment, current_user) and str(user_id) != str(current_user.userId):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Members may only resend their own access mail",
-        )
+    ensure_resend_access(current_user, deployment, user_id, db)
 
     # SMTP kill-switch check: refuse cleanly with 503 BEFORE running the
     # notifier so the response carries the correct semantic ("we chose
