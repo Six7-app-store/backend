@@ -112,6 +112,7 @@ def test_app_list_and_detail_carry_latest_approved_version(client, db, mock_user
 
     assert listed == {"Online-IDE": "v1.2.0", "Entwurf": None}
     assert detail["latestApprovedVersion"] == "v1.2.0"
+    assert set(detail["approvedVersions"]) == {"v1.0.0", "v1.2.0"}
 
 
 @pytest.mark.integration
@@ -161,13 +162,19 @@ def test_non_owner_may_only_deploy_an_approved_version(client, db, mock_user, no
 
 
 @pytest.mark.integration
-def test_owner_may_deploy_an_unapproved_version(client, db, mock_user, no_celery):
+def test_owner_requires_approval_before_deploying(client, db, mock_user, no_celery):
     app = create_app_in_db(db, mock_user)
     _credentials(db, mock_user)
 
     with _variables([]):
         response = client.post("/deployments/", json={"name": "x", "appId": str(app.appId), "releaseTag": "v0.1.0"})
 
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "version_not_approved"
+    no_celery.assert_not_called()
+    _approve(db, app, "v0.1.0")
+    with _variables([]):
+        response = client.post("/deployments/", json={"name": "x", "appId": str(app.appId), "releaseTag": "v0.1.0"})
     assert response.status_code == 201, response.text
 
 
@@ -182,6 +189,7 @@ FLAVOR = {"name": "flavor", "type": "string", "required": False, "default": "m1.
 @pytest.mark.integration
 def test_create_rejects_a_missing_required_file_before_the_worker(client, db, mock_user, no_celery):
     app = create_app_in_db(db, mock_user)
+    _approve(db, app, "v1.0.0")
     _credentials(db, mock_user)
     luca = _user(db, "luca.baeck")
     mika = _user(db, "mika.jun")
@@ -213,6 +221,7 @@ def test_create_rejects_a_missing_required_file_before_the_worker(client, db, mo
 @pytest.mark.integration
 def test_create_rejects_a_missing_required_variable_without_inputs(client, db, mock_user, no_celery):
     app = create_app_in_db(db, mock_user)
+    _approve(db, app, "v1")
     _credentials(db, mock_user)
 
     with _variables([COURSE_CODE, FLAVOR]):

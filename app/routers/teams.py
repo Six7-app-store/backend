@@ -11,11 +11,26 @@ from app.schemas import TeamCreate, TeamResponse, TeamUpdate, TeamWithMembers
 from app.utils.auth import get_current_user
 from app.utils.capabilities import (
     can_view_deployment_owner,
+    ensure_operate_deployment,
     ensure_view_deployment_member,
 )
 from app.utils.permissions import require_staff
 
 router = APIRouter()
+
+
+def _ensure_team_operation(db: Session, user: User, deployment_id: UUID) -> None:
+    deployment = crud_deployments.get_deployment(db, deployment_id)
+    if not deployment:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+    ensure_operate_deployment(user, deployment, db)
+
+
+def _ensure_existing_team_operation(db: Session, user: User, team_id: UUID) -> None:
+    team = crud_teams.get_team(db, team_id)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    _ensure_team_operation(db, user, team.deploymentId)
 
 
 # ----------------------------------------------------------------
@@ -104,6 +119,7 @@ def create_team(
     Create a new team
     - **Requires**: TEACHER or ADMIN role
     """
+    _ensure_team_operation(db, current_user, team.deploymentId)
     return crud_teams.create_team(db, team)
 
 
@@ -121,6 +137,7 @@ def update_team(
     Update a team
     - **Requires**: TEACHER or ADMIN role
     """
+    _ensure_existing_team_operation(db, current_user, team_id)
     team = crud_teams.update_team(db, team_id, team_update)
     if not team:
         raise HTTPException(
@@ -143,6 +160,7 @@ def delete_team(
     Delete a team
     - **Requires**: TEACHER or ADMIN role
     """
+    _ensure_existing_team_operation(db, current_user, team_id)
     success = crud_teams.delete_team(db, team_id)
     if not success:
         raise HTTPException(
@@ -166,6 +184,7 @@ def add_user_to_team(
     Add a user to a team
     - **Requires**: TEACHER or ADMIN role
     """
+    _ensure_existing_team_operation(db, current_user, team_id)
     success = crud_teams.add_user_to_team(db, team_id, user_id)
     if not success:
         raise HTTPException(
@@ -189,6 +208,7 @@ def remove_user_from_team(
     Remove a user from a team
     - **Requires**: TEACHER or ADMIN role
     """
+    _ensure_existing_team_operation(db, current_user, team_id)
     success = crud_teams.remove_user_from_team(db, team_id, user_id)
     if not success:
         raise HTTPException(

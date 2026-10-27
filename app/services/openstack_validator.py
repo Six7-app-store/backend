@@ -15,6 +15,7 @@ from openstack import exceptions as os_exc
 
 from app.models import OpenStackAuthType
 from app.schemas import OpenStackCredentialUpsert
+from app.utils.openstack_endpoints import ensure_allowed_auth_url
 
 _TIMEOUT_SECONDS = 15
 
@@ -56,6 +57,7 @@ def validate(payload: OpenStackCredentialUpsert) -> tuple[bool, str | None]:
     The error message is short and human-readable — safe to surface in the
     UI. Never echoes the secret back.
     """
+    ensure_allowed_auth_url(payload.auth_url)
     try:
         conn = openstack.connect(**_build_connect_kwargs(payload))
         # Force a token round-trip; .authorize() returns the token string.

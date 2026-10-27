@@ -212,6 +212,7 @@ class AppWithVersions(AppWithUser):
     # Entries from ``git_service.get_versions``: ``version`` plus commit
     # and, for tags with a release, its details (values may be null).
     versions: list[dict[str, Any]] = []
+    approvedVersions: list[str] = []
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -232,6 +233,7 @@ class AppVersionApprovalResponse(BaseModel):
     approvalId: UUID
     appId: UUID
     version_tag: str
+    commit_sha: str | None = None
     status: AppVersionApprovalStatus
     diff_url: str | None = None
     notes: str | None = None

@@ -13,6 +13,7 @@ def submit_version(
     version_tag: str,
     diff_url: str | None = None,
     notes: str | None = None,
+    commit_sha: str | None = None,
 ) -> AppVersionApproval:
     """Submit a version for admin review.
 
@@ -48,6 +49,7 @@ def submit_version(
     approval = AppVersionApproval(
         appId=app_id,
         version_tag=version_tag,
+        commit_sha=commit_sha,
         diff_url=diff_url,
         notes=notes,
         status=AppVersionApprovalStatus.PENDING,

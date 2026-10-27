@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.crud import app_version_approvals as crud_approvals
 from app.crud import apps as crud_apps
 from app.database import get_db
@@ -21,6 +22,7 @@ from app.schemas import (
 )
 from app.services.git_service import git_service
 from app.services.hcl_variable_parser import load_variable_definitions
+from app.services.release_pinning import resolve_tag
 from app.utils.app_image import build_image_data_url, parse_image_data_url
 from app.utils.auth import get_current_user
 from app.utils.capabilities import (
@@ -176,6 +178,10 @@ def get_app(
         app.versions = []
 
     app.latestApprovedVersion = crud_approvals.latest_approved_version(db, app.appId)
+    app.approvedVersions = [
+        approval.version_tag for approval in crud_approvals.get_approvals_for_app(db, app.appId)
+        if approval.status.value == "approved"
+    ]
     return _serialize_app(app)
 
 
@@ -212,7 +218,18 @@ def get_app_variables(
     # public+approved combination.
     ensure_view_app(current_user, app, db=db)
 
-    variables = load_variable_definitions(app, version)
+    source_version = version
+    if settings.REQUIRE_PINNED_RELEASES:
+        approved = next(
+            (entry for entry in crud_approvals.get_approvals_for_app(db, app_id)
+             if entry.version_tag == version and entry.status.value == "approved"),
+            None,
+        )
+        if approved:
+            if not approved.commit_sha:
+                raise HTTPException(status_code=409, detail={"reason": "approval_commit_missing"})
+            source_version = approved.commit_sha
+    variables = load_variable_definitions(app, source_version)
     if not variables:
         logger.warning("No variables found for app %s version %s", app_id, version)
 
@@ -271,7 +288,8 @@ def create_app(
                 if not tag:
                     continue
                 try:
-                    crud_approvals.submit_version(db, app_id=app_id, version_tag=tag)
+                    sha = resolve_tag(app.git_link, tag) if settings.REQUIRE_PINNED_RELEASES else None
+                    crud_approvals.submit_version(db, app_id=app_id, version_tag=tag, commit_sha=sha)
                 except HTTPException:
                     pass  # 409: this version is already pending or approved
                 except SQLAlchemyError:
@@ -352,6 +370,9 @@ def submit_version(
 
     ensure_submit_app_version(current_user, app)
 
+    if app.is_private:
+        raise HTTPException(status_code=409, detail={"reason": "private_app_not_reviewable"})
+
     if not app.git_link:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -361,8 +382,9 @@ def submit_version(
     # Marker validation — blocks submit on invalid @openstack markers.
     # Same logic as the approve endpoint; git errors (400/500) are
     # skipped so submit still works when the repo is unreachable.
+    commit_sha = resolve_tag(app.git_link, version_tag) if settings.REQUIRE_PINNED_RELEASES else None
     try:
-        variables = load_variable_definitions(app, version_tag)
+        variables = load_variable_definitions(app, commit_sha or version_tag)
         marker_errors = [v.get("markerError") for v in variables if v.get("markerError")]
         if marker_errors:
             raise HTTPException(
@@ -376,13 +398,14 @@ def submit_version(
                 },
             )
     except HTTPException as exc:
-        if exc.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY:
+        if settings.REQUIRE_PINNED_RELEASES or exc.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY:
             raise
         # 400 (no git_link, handled above) or 500 (git unreachable) —
         # allow submit anyway.
 
     return crud_approvals.submit_version(
-        db, app_id=app_id, version_tag=version_tag, diff_url=body.diff_url, notes=body.notes
+        db, app_id=app_id, version_tag=version_tag, diff_url=body.diff_url, notes=body.notes,
+        commit_sha=commit_sha,
     )
 
 

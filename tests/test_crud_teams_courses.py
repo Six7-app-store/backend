@@ -12,6 +12,7 @@ import uuid
 from uuid import uuid4
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from app.crud import courses as courses_crud
 from app.crud import teams as teams_crud
@@ -99,6 +100,16 @@ def test_create_team_with_user_ids_persists_team_and_memberships(db):
         db.query(UserToTeam).filter(UserToTeam.teamId == team.teamId).all()
     )
     assert {m.userId for m in memberships} == {u1.userId, u2.userId}
+
+
+@pytest.mark.integration
+def test_create_team_rolls_back_when_a_member_does_not_exist(db):
+    deployment = _make_deployment(db)
+    payload = TeamCreate(name="Incomplete", deploymentId=deployment.deploymentId, userIds=[uuid4()])
+    with pytest.raises(IntegrityError):
+        teams_crud.create_team(db, payload)
+    db.rollback()
+    assert db.query(Team).filter_by(name="Incomplete").count() == 0
 
 
 @pytest.mark.integration

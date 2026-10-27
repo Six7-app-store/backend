@@ -165,12 +165,11 @@ def ensure_create_deployment(user: User) -> None:
 def can_deploy_version(user: User, app: App, release_tag: str | None, db: Session) -> bool:
     """Whether ``user`` may deploy ``release_tag`` of ``app``.
 
-    The owner and admins may deploy any tag (to test their own work). Everybody
-    else may deploy only a version an admin has approved: seeing an app because
-    *some* version is approved (:func:`can_view_app`) says nothing about the
-    version being asked for. No tag means nothing is approved.
+    Admins may deploy any tag. Every other user, including the app author,
+    may deploy only a version an admin has approved. Seeing an app because
+    *some* version is approved says nothing about the version being asked for.
     """
-    if _is_admin(user) or _is_owner(user, app.userId):
+    if _is_admin(user):
         return True
     if not release_tag:
         return False
