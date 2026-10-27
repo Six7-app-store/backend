@@ -242,6 +242,7 @@ def list_deployments(
             userInputVar=user_input_var_parsed,
             status=status_value,
             created_at=first_created_at,
+            vm_missing_since=deployment.vm_missing_since,
         ))
 
     return result
@@ -363,6 +364,7 @@ def get_deployment(
         userInputVar=user_input_var_parsed,
         status=status_value,
         created_at=created_at,
+        vm_missing_since=deployment.vm_missing_since,
         user=deployment.user,
         app=serialised_app,
         teams=teams,
@@ -1161,11 +1163,18 @@ def create_deployment(
 #   * any other status (running / pending / destroying / pausing / resuming)
 #                               → 409, the user has to wait.
 #
+# ``?entry_only=true`` skips the destroy and soft-deletes straight away.
+# Only allowed where a destroy cannot help: while ``vm_missing_since`` is
+# set (the VMs are already gone from OpenStack), or when the last destroy
+# itself failed (e.g. the app repo was deleted, so the worker has no tofu
+# code to run). Leftover resources stay in the user's project.
+#
 # Frontend doesn't have to know the difference — it just calls DELETE
 # and switches into the live-stream view when the response is 202.
 @router.delete("/{deployment_id}")
 def delete_deployment(
     deployment_id: UUID,
+    entry_only: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1206,6 +1215,24 @@ def delete_deployment(
                 "Wait for the active task to finish."
             ),
         )
+
+    if entry_only:
+        latest = crud_deployments.get_latest_task(db, deployment_id)
+        destroy_failed = (
+            latest is not None
+            and latest.type == TaskType.DESTROY
+            and latest.status == TaskStatus.FAILED
+        )
+        if deployment.vm_missing_since is None and not destroy_failed:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "entry_only is only allowed when the deployment's VMs "
+                    "are missing from OpenStack or its last destroy failed."
+                ),
+            )
+        crud_deployments.soft_delete_deployment(db, deployment_id)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     # Resources may exist — destroy them first; the listener will
     # auto-soft-delete the row when the destroy task succeeds. ``paused``

@@ -193,6 +193,11 @@ class Deployment(Base):
     # allowed in terminal states, so OpenStack resources are already
     # gone by the time this is set.
     deleted_at = Column(DateTime, nullable=True)
+    # Set by the VM-presence loop when every compute instance in the
+    # deployment's OpenTofu state is gone from OpenStack (deleted outside
+    # the App Store). Cleared again as soon as one of them reappears.
+    # Only a marker — the row stays until a user removes the entry.
+    vm_missing_since = Column(DateTime, nullable=True)
 
     __table_args__ = (
         Index(

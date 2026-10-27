@@ -1,6 +1,5 @@
 import ipaddress
 import socket
-from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import urlparse
 from uuid import UUID
@@ -8,6 +7,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from app.models import AppVersionApprovalStatus, OpenStackAuthType, TaskStatus, TaskType, UserRole
+from app.utils.time import UtcDatetime
 
 
 # ----------------------------------------------------------------
@@ -37,7 +37,7 @@ class UserResponse(UserBase):
     keycloak_id: str | None = None
     firstName: str | None = None
     lastName: str | None = None
-    created_at: datetime
+    created_at: UtcDatetime
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -189,7 +189,7 @@ class AppUpdate(BaseModel):
 class AppResponse(AppBase):
     appId: UUID
     userId: UUID
-    created_at: datetime
+    created_at: UtcDatetime
     is_private: bool
     # Data-URL or null. Populated from ``app.image`` + ``app.image_mime``
     # by ``serialize_app_image``; the raw bytes never leave the backend.
@@ -237,8 +237,8 @@ class AppVersionApprovalResponse(BaseModel):
     notes: str | None = None
     rejection_reason: str | None = None
     reviewed_by: UUID | None = None
-    reviewed_at: datetime | None = None
-    created_at: datetime
+    reviewed_at: UtcDatetime | None = None
+    created_at: UtcDatetime
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -298,7 +298,10 @@ class DeploymentResponse(DeploymentBase):
     releaseTag: str | None = None
     userInputVar: dict[str, Any] | None = None
     status: str | None = None  # From latest task
-    created_at: datetime | None = None
+    created_at: UtcDatetime | None = None
+    # Set when every VM of the deployment is gone from OpenStack; the UI
+    # then offers to remove the entry (see services/vm_presence.py).
+    vm_missing_since: UtcDatetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -332,9 +335,9 @@ class TaskSummary(BaseModel):
     taskId: UUID
     type: TaskType
     status: TaskStatus
-    started_at: datetime | None = None
-    finished_at: datetime | None = None
-    created_at: datetime
+    started_at: UtcDatetime | None = None
+    finished_at: UtcDatetime | None = None
+    created_at: UtcDatetime
     # Live-progress fields (mirror of Task model), used to render the
     # progress bar on page reload; SSE supplies real-time updates.
     current_phase: str | None = None
@@ -498,8 +501,8 @@ class TaskBase(BaseModel):
     celeryTaskId: str | None = None
     type: TaskType
     status: TaskStatus
-    started_at: datetime | None = None
-    finished_at: datetime | None = None
+    started_at: UtcDatetime | None = None
+    finished_at: UtcDatetime | None = None
     logs: str | None = None
     tf_state: str | None = None
     outputs: str | None = None
@@ -512,8 +515,8 @@ class TaskCreate(TaskBase):
 
 class TaskUpdate(BaseModel):
     status: TaskStatus | None = None
-    started_at: datetime | None = None
-    finished_at: datetime | None = None
+    started_at: UtcDatetime | None = None
+    finished_at: UtcDatetime | None = None
     logs: str | None = None
     tf_state: str | None = None
     outputs: str | None = None
@@ -522,7 +525,7 @@ class TaskUpdate(BaseModel):
 
 class TaskResponse(TaskBase):
     taskId: UUID
-    created_at: datetime
+    created_at: UtcDatetime
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -627,10 +630,10 @@ class OpenStackCredentialResponse(OpenStackCredentialBase):
     auth_type: OpenStackAuthType | None = None  # type: ignore[assignment]
     auth_url: str | None = None  # type: ignore[assignment]
     has_credential: bool = True
-    last_validated_at: datetime | None = None
+    last_validated_at: UtcDatetime | None = None
     last_validation_error: str | None = None
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
+    created_at: UtcDatetime | None = None
+    updated_at: UtcDatetime | None = None
     is_locked: bool = False
     active_deployments: int = 0
 
@@ -660,7 +663,7 @@ class UiSettingsResponse(BaseModel):
     logos: UiLogos = Field(default_factory=UiLogos)
     # Changes on every save; the frontend appends it to the logo URLs so a
     # replaced logo is not served from the browser cache.
-    updatedAt: datetime | None = None
+    updatedAt: UtcDatetime | None = None
 
 
 class UiSettingsUpdate(BaseModel):
