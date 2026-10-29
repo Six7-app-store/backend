@@ -37,7 +37,7 @@ from app.schemas import (
     MyAccessResponse,
     TaskSummary,
 )
-from app.services import deployment_notifier, email_service
+from app.services import deployment_notifier, email_service, maintenance_gate
 from app.services import lifecycle as lifecycle_service
 from app.services import task_service as task_service_module
 from app.services.deployment_pubsub import pubsub
@@ -1337,6 +1337,12 @@ def _commit_and_dispatch(
             db,
             deployment_id=deployment_id,
             task_type=task_type,
+        )
+    except maintenance_gate.MaintenanceInProgress:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Platform maintenance in progress; please retry later",
         )
     except task_service_module.ActiveTaskExistsError:
         if rollback_on_conflict:
