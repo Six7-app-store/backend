@@ -102,11 +102,19 @@ def verify_keycloak_token_offline(token: str) -> dict:
     """Validate JWT signature against Keycloak public key (fast, no server round-trip)."""
     try:
         public_key = _get_realm_public_key_pem()
+        enforce_binding = settings.KEYCLOAK_ENFORCE_TOKEN_BINDING
         return jwt.decode(
             token,
             public_key,
             algorithms=["RS256"],
-            options={"verify_signature": True, "verify_aud": False, "verify_exp": True},
+            issuer=settings.KEYCLOAK_TOKEN_ISSUER if enforce_binding else None,
+            audience=settings.KEYCLOAK_TOKEN_AUDIENCE if enforce_binding else None,
+            options={
+                "verify_signature": True,
+                "verify_aud": enforce_binding,
+                "verify_exp": True,
+                "require": ["exp", "iss", "sub", *(["aud"] if enforce_binding else [])],
+            },
         )
     except InvalidTokenError:
         raise HTTPException(

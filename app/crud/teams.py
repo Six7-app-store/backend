@@ -105,10 +105,9 @@ def create_team(db: Session, team: TeamCreate) -> Team:
         deploymentId=team.deploymentId
     )
     db.add(db_team)
-    # Commit the team row first so ``teamId`` is populated before staging
-    # memberships.
-    db.commit()
-    db.refresh(db_team)
+    # Obtain the generated ID without committing a partial team if a
+    # membership insert fails (for example, an unknown user ID).
+    db.flush()
 
     _add_team_members(db, db_team, team.userIds)
 

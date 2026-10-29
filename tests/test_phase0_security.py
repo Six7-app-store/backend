@@ -360,6 +360,35 @@ def test_team_list_is_scoped_for_students(db):
     assert own.status_code == 200
 
 
+@pytest.mark.integration
+def test_deployment_inputs_are_hidden_from_members_and_unrelated_teachers(db):
+    import json
+
+    owner = _user(db, UserRole.TEACHER)
+    dep = _deployment(db, owner, _app(db, owner))
+    dep.userInputVar = json.dumps({"tofu": {"secret": "private"}})
+    member = _user(db, UserRole.STUDENT)
+    stranger = _user(db, UserRole.TEACHER)
+    _team(db, dep, members=[member])
+    db.commit()
+
+    with as_user(member) as client:
+        detail = client.get(f"/deployments/{dep.deploymentId}")
+        listing = client.get("/deployments/")
+    assert detail.status_code == 200
+    assert detail.json()["userInputVar"] is None
+    assert next(d for d in listing.json() if d["deploymentId"] == str(dep.deploymentId))["userInputVar"] is None
+
+    with as_user(stranger) as client:
+        detail = client.get(f"/deployments/{dep.deploymentId}")
+    assert detail.status_code == 200
+    assert detail.json()["userInputVar"] is None
+
+    with as_user(owner) as client:
+        detail = client.get(f"/deployments/{dep.deploymentId}")
+    assert detail.json()["userInputVar"]["tofu"]["secret"] == "private"
+
+
 # ================================================================
 # A-05 · Beim Deployen muss die gewählte Version freigegeben sein
 # ================================================================
@@ -457,8 +486,8 @@ def test_non_owner_can_deploy_approved_version(db, celery_stub):
 
 
 @pytest.mark.integration
-def test_owner_may_still_deploy_any_version(db, celery_stub):
-    """Offen im Plan (Frage 3): Besitzer bleiben vorerst unverändert."""
+def test_owner_cannot_deploy_unapproved_version(db, celery_stub):
+    """Eigene Templates benötigen ebenfalls eine Admin-Freigabe."""
     owner = _user(db, UserRole.TEACHER)
     _credentials(db, owner)
     app = _app(db, owner)
@@ -466,7 +495,8 @@ def test_owner_may_still_deploy_any_version(db, celery_stub):
     with as_user(owner) as c:
         r = _deploy(c, app, "dev-branch")
 
-    assert r.status_code == 201, r.text
+    assert r.status_code == 403, r.text
+    celery_stub.assert_not_called()
 
 
 # ================================================================

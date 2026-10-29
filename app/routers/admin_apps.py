@@ -3,6 +3,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.crud import app_version_approvals as crud_approvals
 from app.crud import apps as crud_apps
 from app.database import get_db
@@ -57,8 +58,11 @@ def approve_version(
 
     # Block approval if any variable carries a marker error. If the git repo
     # is unreachable (400/500), skip validation rather than hard-blocking.
+    approval = crud_approvals._get_approval_or_404(db, app_id, version_tag)
+    if settings.REQUIRE_PINNED_RELEASES and not approval.commit_sha:
+        raise HTTPException(status_code=409, detail={"reason": "approval_commit_missing"})
     try:
-        variables = load_variable_definitions(app, version_tag)
+        variables = load_variable_definitions(app, approval.commit_sha or version_tag)
         marker_errors = [
             v.get("markerError") for v in variables if v.get("markerError")
         ]
@@ -74,7 +78,7 @@ def approve_version(
                 },
             )
     except HTTPException as exc:
-        if exc.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY:
+        if settings.REQUIRE_PINNED_RELEASES or exc.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY:
             raise
         # 400 (no git_link) or 500 (git unreachable) — skip validation
 

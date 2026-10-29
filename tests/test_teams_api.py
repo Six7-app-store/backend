@@ -5,26 +5,8 @@ Tests für ``backend/app/routers/teams.py``. Die Konvention folgt
 ``tests/test_apps.py``: ``@pytest.mark.integration`` für alles mit DB,
 Auth- und DB-Overrides via ``app.dependency_overrides``.
 
-Beobachtung zur aktuellen Implementierung (Stand 2026-06):
-
-* ``GET /teams/`` und ``GET /teams/{team_id}`` sind für **alle**
-  authentifizierten User offen — der Router filtert nicht nach
-  Owner/Membership. Die "_sees_only_member_teams_"-Cases hier
-  dokumentieren genau dieses Verhalten als Vertrag: jeder Auth-User
-  bekommt die volle Liste (inkl. der Teams, in denen er Mitglied ist).
-  Sobald die Owner-/Membership-Filter eingebaut werden, müssen diese
-  Tests entsprechend nachgezogen werden.
-* ``POST/PUT/DELETE /teams`` und das User-Management an einem Team sind
-  per ``require_staff`` (TEACHER oder ADMIN) abgesichert. Es gibt
-  keinen feineren Owner-Check pro Team — d.h. jeder TEACHER darf jedes
-  Team editieren. Die "_owner_ok_"- und "_unrelated_teacher_403_"-Cases
-  testen den ``require_staff``-Pfad: TEACHER → erlaubt (200/204),
-  STUDENT → 403 mit ``code=role_required``.
-* ``Team`` ist direkt an ein Deployment gebunden (NOT-NULL
-  ``deploymentId``). Das alte ``UserGroup``-Zwischenmodell wurde im
-  Pre-RBAC-Refactor entfernt; ``TeamBase``/``TeamCreate`` und der
-  Listen-Filter sprechen jetzt durchgängig ``deploymentId``. Der
-  Happy-Path über ``POST /teams`` ist damit round-trip-fähig.
+Reads are scoped to the deployment and membership. Team mutations require
+both a staff role and permission to operate the associated deployment.
 """
 
 from __future__ import annotations
@@ -293,8 +275,7 @@ def test_update_team_admin_ok(db, mock_admin, mock_user):
 
 @pytest.mark.integration
 def test_update_team_teacher_owner_ok(db, mock_user):
-    """Teacher, dessen Deployment das Team enthält, darf das Team
-    umbenennen — heute deckungsgleich mit dem allgemeinen Staff-Gate."""
+    """Teacher, dessen Deployment das Team enthält, darf das Team umbenennen."""
     dep = _make_deployment(db, mock_user)
     team = _make_team(db, name="OwnerBefore", deployment=dep)
 
@@ -312,10 +293,7 @@ def test_update_team_teacher_owner_ok(db, mock_user):
 
 @pytest.mark.integration
 def test_update_team_unrelated_teacher_403(db, mock_user, mock_student):
-    """Ein unbeteiligter Caller ohne Staff-Rolle (hier: STUDENT) bekommt
-    403. Echter "unrelated TEACHER" liefert in der heutigen Routerschicht
-    200, weil ``require_staff`` keinen Owner-Check macht — wir bilden
-    deshalb den existierenden Vertrag ab: Nicht-Staff = 403."""
+    """Ein unbeteiligter Student darf ein Team nicht ändern."""
     dep = _make_deployment(db, mock_user)
     team = _make_team(db, name="UnrelatedBefore", deployment=dep)
 
@@ -326,6 +304,33 @@ def test_update_team_unrelated_teacher_403(db, mock_user, mock_student):
                 json={"name": "Hijack"},
             )
         assert response.status_code == 403
+    finally:
+        fastapi_app.dependency_overrides.clear()
+
+
+@pytest.mark.integration
+def test_foreign_teacher_cannot_change_teams(db, mock_user, mock_student):
+    dep = _make_deployment(db, mock_user)
+    team = _make_team(db, name="Protected", deployment=dep)
+    _add_member(db, team, mock_student)
+    stranger = User(
+        userId=uuid.uuid4(), keycloak_id=str(uuid.uuid4()),
+        email="other-teacher@example.org", username="other-teacher", role=UserRole.TEACHER,
+    )
+    db.add(stranger)
+    db.commit()
+    try:
+        with _override(stranger) as client:
+            assert client.post("/teams/", json={
+                "name": "Injected", "deploymentId": str(dep.deploymentId), "userIds": [],
+            }).status_code == 403
+            assert client.put(f"/teams/{team.teamId}", json={"name": "Changed"}).status_code == 403
+            assert client.post(f"/teams/{team.teamId}/users/{stranger.userId}").status_code == 403
+            assert client.delete(f"/teams/{team.teamId}/users/{mock_student.userId}").status_code == 403
+            assert client.delete(f"/teams/{team.teamId}").status_code == 403
+        db.expire_all()
+        assert db.query(Team).filter_by(teamId=team.teamId).one().name == "Protected"
+        assert db.query(UserToTeam).filter_by(teamId=team.teamId, userId=mock_student.userId).count() == 1
     finally:
         fastapi_app.dependency_overrides.clear()
 
@@ -393,11 +398,7 @@ def test_add_user_to_team_teacher_owner_ok(db, mock_user, mock_student):
 
 @pytest.mark.integration
 def test_add_user_to_team_unrelated_teacher_403(db, mock_user, mock_student):
-    """Caller ohne Staff-Rolle (STUDENT) wird abgewiesen.
-
-    Bemerkung: ein "unrelated TEACHER" (anderer als der Deployment-Owner)
-    bekäme aktuell 204 — der Router prüft nur ``require_staff``. Wir
-    bilden den real abgesicherten Pfad ab (Student = 403)."""
+    """Ein unbeteiligter Student darf keine Mitglieder hinzufügen."""
     dep = _make_deployment(db, mock_user)
     team = _make_team(db, name="AddForbidden", deployment=dep)
 

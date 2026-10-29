@@ -120,6 +120,30 @@ def patched_celery():
 
 
 @pytest.mark.integration
+def test_destroy_dispatches_the_original_commit(client, db, mock_user, patched_celery):
+    deployment = _make_deployment_with_creds(
+        db, mock_user, latest_task_type=TaskType.DEPLOY, latest_task_status=TaskStatus.SUCCESS,
+    )
+    deployment.release_commit = "c" * 40
+    db.commit()
+    response = client.delete(f"/deployments/{deployment.deploymentId}")
+    assert response.status_code == 202
+    assert patched_celery.call_args.kwargs["args"][3] == "c" * 40
+
+
+@pytest.mark.integration
+def test_legacy_destroy_requires_review_when_pinning_enforced(client, db, mock_user, patched_celery, monkeypatch):
+    monkeypatch.setattr(settings, "REQUIRE_PINNED_RELEASES", True)
+    deployment = _make_deployment_with_creds(
+        db, mock_user, latest_task_type=TaskType.DEPLOY, latest_task_status=TaskStatus.SUCCESS,
+    )
+    response = client.delete(f"/deployments/{deployment.deploymentId}")
+    assert response.status_code == 409
+    assert response.json()["detail"]["reason"] == "deployment_commit_missing"
+    patched_celery.assert_not_called()
+
+
+@pytest.mark.integration
 def test_pause_dispatches_when_status_is_success(
     client, db, mock_user, patched_celery,
 ):

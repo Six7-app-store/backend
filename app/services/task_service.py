@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from app.celery_app import celery_app
 from app.crud import tasks as crud_tasks
 from app.models import Task, TaskStatus, TaskType
+from app.services.maintenance_gate import guard_task_admission
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,7 @@ def prepare_task_in_tx(
     ``except IntegrityError`` around ``db.flush()`` catches the racy one
     (two concurrent requests both pass the pre-check).
     """
+    guard_task_admission(db)
     existing = crud_tasks.get_tasks(db, deployment_id=deployment_id)
     for task in existing:
         if task.status in (TaskStatus.PENDING, TaskStatus.RUNNING):

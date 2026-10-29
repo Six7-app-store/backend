@@ -23,7 +23,9 @@ from app.models import (
     TaskStatus,
     TaskType,
     Team,
+    User,
     UserOpenStackCredential,
+    UserRole,
     UserToTeam,
 )
 
@@ -209,6 +211,30 @@ def test_resend_access_admin_can_resend_for_other_user(
     assert response.status_code == 202, response.text
     assert response.json() == {"status": "sent"}
     m_resend.assert_called_once()
+
+
+@pytest.mark.integration
+def test_resend_access_unrelated_teacher_cannot_send_for_another_user(
+    client, db, mock_user, mock_student,
+):
+    from app.main import app as fastapi_app
+    from app.utils.auth import get_current_user
+
+    deployment, team = _seed_deployment_with_team(db, mock_user, member=mock_student)
+    stranger = User(
+        userId=uuid.uuid4(), keycloak_id=str(uuid.uuid4()),
+        email="resend-stranger@example.org", username="resend-stranger", role=UserRole.TEACHER,
+    )
+    db.add(stranger)
+    db.commit()
+    fastapi_app.dependency_overrides[get_current_user] = lambda: stranger
+    with patch("app.routers.deployments.deployment_notifier.resend_user_access") as notifier:
+        response = client.post(
+            f"/deployments/{deployment.deploymentId}/teams/{team.teamId}"
+            f"/users/{mock_student.userId}/resend-access"
+        )
+    assert response.status_code == 403
+    notifier.assert_not_called()
 
 
 @pytest.mark.integration
