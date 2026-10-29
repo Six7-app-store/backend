@@ -12,6 +12,13 @@ from tests.conftest import TestingSessionLocal
 from tests.test_deployments_pause_resume import _make_deployment_with_creds
 
 
+@pytest.fixture
+def control_on_test_db(monkeypatch):
+    # maintenance_control opens its own sessions from app.database, which is
+    # bound to DATABASE_URL (the dev database), not to TEST_DATABASE_URL.
+    monkeypatch.setattr(maintenance_control, "SessionLocal", TestingSessionLocal)
+
+
 @pytest.mark.integration
 def test_maintenance_blocks_admission_until_matching_owner_releases(db):
     assert maintenance_gate.acquire_maintenance(db, "update-a")
@@ -93,7 +100,9 @@ def test_real_pause_endpoint_returns_503_without_dispatch_during_maintenance(
 
 
 @pytest.mark.integration
-def test_control_timeout_releases_gate_without_touching_pending_task(db, mock_user):
+def test_control_timeout_releases_gate_without_touching_pending_task(
+    db, mock_user, control_on_test_db
+):
     deployment = _make_deployment_with_creds(
         db, mock_user, latest_task_type=TaskType.DEPLOY, latest_task_status=TaskStatus.PENDING,
     )
@@ -103,7 +112,7 @@ def test_control_timeout_releases_gate_without_touching_pending_task(db, mock_us
 
 
 @pytest.mark.integration
-def test_control_retains_gate_until_explicit_release(db):
+def test_control_retains_gate_until_explicit_release(db, control_on_test_db):
     assert maintenance_control.begin_and_drain("successful-drain", timeout=0)
     assert db.execute(text("SELECT owner FROM platform_maintenance WHERE id=1")).scalar_one() == "successful-drain"
     db.rollback()
