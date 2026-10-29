@@ -135,6 +135,12 @@ def _truncate_tables(_setup_schema):
     The fixture depends on ``_setup_schema`` so pytest enforces
     ordering: schema MUST exist before the first truncate runs.
     """
+    # create_all does not run the migration that seeds the singleton row.
+    with engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO platform_maintenance (id, owner) VALUES (1, NULL) "
+            "ON CONFLICT (id) DO NOTHING"
+        ))
     yield
     table_names = [t.name for t in reversed(Base.metadata.sorted_tables)]
     if not table_names:

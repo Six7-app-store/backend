@@ -3,6 +3,7 @@ import uuid
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     Enum,
@@ -234,6 +235,15 @@ class Deployment(Base):
 # ----------------------------------------------------------------
 # TASK MODEL
 # ----------------------------------------------------------------
+class PlatformMaintenance(Base):
+    """Singleton shared by task admission and platform-update coordinators."""
+
+    __tablename__ = "platform_maintenance"
+    id = Column(Integer, primary_key=True)
+    owner = Column(String(64), nullable=True)
+    __table_args__ = (CheckConstraint("id = 1", name="ck_platform_maintenance_singleton"),)
+
+
 class Task(Base):
     __tablename__ = "tasks"
 
